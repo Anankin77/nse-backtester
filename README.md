@@ -33,6 +33,10 @@ python run.py compare DEMO
 | `python run.py optimize INFY --strategy rsi --split 2022-01-01` | Finds the best settings on pre-2022 data, then checks them on 2022+ data |
 | `python run.py compare ^NSEI --start 2010-01-01` | Nifty 50 index |
 | `python run.py test mydata.csv --strategy breakout` | Your own CSV (Date, Open, High, Low, Close, Volume) |
+| `python run.py scan` | Every strategy on every stock in `watchlist.txt`: which ideas work where |
+| `python run.py today` | Today's buy/sell signals for your watchlist, for paper trading (run after 3:30 pm) |
+
+**New to this? Start with the [learning path](docs/LEARNING.md).**
 
 Common options: `--start 2015-01-01`, `--end 2024-12-31`, `--capital 50000`, `--no-costs`, `--no-plot`.
 
@@ -64,7 +68,7 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 ## How it stays honest
 
 1. **No look-ahead bias.** A signal decided at today's close is filled at tomorrow's open. The strategy never sees the future.
-2. **Real costs.** Zerodha delivery approx.: STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`). The flat DP charge (~₹16 per sell) is not included, so small orders look slightly better than reality.
+2. **Real costs.** Zerodha delivery rates (checked Oct 2026): STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`). The flat DP charge (₹15.34 per sell) and capital-gains tax are not included, so small orders and frequent traders look better than reality.
 3. **Overfitting check.** `optimize` tunes on old data and reports performance on newer, unseen data. If the test result collapses, the "best" settings were luck.
 4. **Tested.** `pytest` checks the timing rule, cost handling, and that trade-by-trade returns reconcile with the equity curve.
 
@@ -95,4 +99,4 @@ tests/                   pytest suite
 - Position sizing (risk a fixed % per trade) and stop-losses
 - Portfolio mode: run a strategy across all Nifty 50 stocks
 - Walk-forward optimisation (repeat the train/test split over rolling windows)
-- Paper-trading mode that prints today's signal for your watchlist
+- Survivorship-bias-free data (include stocks that left the Nifty)

@@ -1,0 +1,12 @@
+# One NSE symbol per line. Used by `scan` and `today` when you don't list tickers.
+# A deliberately mixed set: index, steady compounders, cyclicals, a laggard.
+^NSEI
+RELIANCE
+HDFCBANK
+TCS
+INFY
+ITC
+SBIN
+TATASTEEL
+HINDUNILVR
+BHARTIARTL

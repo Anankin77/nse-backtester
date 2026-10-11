@@ -6,6 +6,8 @@ Examples
   python run.py optimize INFY --strategy sma --split 2022-01-01
   python run.py compare DEMO            # offline, synthetic prices
   python run.py test mydata.csv --strategy rsi
+  python run.py scan                    # every strategy on every stock in watchlist.txt
+  python run.py today                   # today's signals, for paper trading
 """
 from __future__ import annotations
 
@@ -104,6 +106,67 @@ def cmd_optimize(args):
     print("\nIf the test result is much worse than train, the 'best' settings were luck (overfitting).")
 
 
+def watchlist(tickers: list[str]) -> list[str]:
+    if tickers:
+        return tickers
+    path = Path(__file__).resolve().parent / "watchlist.txt"
+    return [ln.strip() for ln in path.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+
+
+def cmd_scan(args):
+    """Every strategy on every stock: which ideas work where?"""
+    rows = []
+    for tk in watchlist(args.tickers):
+        try:
+            df = load(tk, args.start, args.end)
+        except ValueError as e:
+            print(f"  skip {tk}: {e}")
+            continue
+        row = {"Stock": tk.upper()}
+        for s in STRATEGIES:
+            st = backtest(df, s, {}, args).stats
+            label = "B&H" if s == "buyhold" else s
+            row[f"{label} CAGR"] = st["CAGR %"]
+            row[f"{label} MaxDD"] = st["Max drawdown %"]
+        cagrs = {s: row[f"{s} CAGR"] for s in ("sma", "rsi", "breakout")}
+        best = max(cagrs, key=cagrs.get)
+        row["Beat B&H?"] = f"yes ({best})" if cagrs[best] > row["B&H CAGR"] else "no"
+        rows.append(row)
+        print(f"  done {tk.upper()}")
+
+    out = pd.DataFrame(rows).set_index("Stock").round(1)
+    print(f"\nCAGR % and max drawdown % per strategy, {args.start} -> {args.end or 'today'}\n")
+    print(out.to_string())
+    beat = (out["Beat B&H?"] != "no").sum()
+    print(f"\nA strategy beat buy & hold on {beat} of {len(out)} stocks.")
+    OUT.mkdir(exist_ok=True)
+    path = OUT / "scan.csv"
+    out.to_csv(path)
+    print(f"Saved to {path}")
+
+
+def cmd_today(args):
+    """Current signal for each stock, for paper trading. Run after market close (3:30 pm)."""
+    start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")  # enough for SMA 200
+    rows = []
+    for tk in watchlist(args.tickers):
+        try:
+            df = download(tk, start, None, use_cache=False)
+        except ValueError as e:
+            print(f"  skip {tk}: {e}")
+            continue
+        row = {"Stock": tk.upper(), "Date": df.index[-1].date(), "Close": round(float(df["Close"].iloc[-1]), 2)}
+        for s in ("sma", "rsi", "breakout"):
+            sig = STRATEGIES[s](df)
+            now, before = sig.iloc[-1], sig.iloc[-2]
+            row[s] = ("BUY" if now else "SELL") + " tmrw" if now != before else ("hold" if now else "-")
+        rows.append(row)
+
+    print("\nSignals at the last close. 'BUY tmrw' / 'SELL tmrw' = act at tomorrow's open;")
+    print("'hold' = stay in; '-' = stay out. Paper trade these; don't treat them as advice.\n")
+    print(pd.DataFrame(rows).to_string(index=False))
+
+
 def show(df, results, args, title):
     OUT.mkdir(exist_ok=True)
     print(f"\n{title}")
@@ -146,6 +209,18 @@ def main():
     o.add_argument("--strategy", choices=list(GRIDS), default="sma")
     o.add_argument("--split", default="2022-01-01", help="train before this date, test after")
     o.set_defaults(func=cmd_optimize)
+
+    sc = sub.add_parser("scan", help="all strategies across many stocks (watchlist.txt by default)")
+    sc.add_argument("tickers", nargs="*", help="e.g. TCS ITC SBIN; empty = watchlist.txt")
+    sc.add_argument("--start", default="2015-01-01")
+    sc.add_argument("--end", default=None)
+    sc.add_argument("--capital", type=float, default=100_000)
+    sc.add_argument("--no-costs", action="store_true")
+    sc.set_defaults(func=cmd_scan)
+
+    td = sub.add_parser("today", help="current buy/sell signals for paper trading")
+    td.add_argument("tickers", nargs="*", help="empty = watchlist.txt")
+    td.set_defaults(func=cmd_today)
 
     args = p.parse_args()
     try:
