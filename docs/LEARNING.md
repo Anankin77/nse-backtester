@@ -98,6 +98,8 @@ This runs every strategy on all 10 stocks in `watchlist.txt`. Then ask yourself:
 
 Usually the second answer is much bigger than the first. That's the honest pitch for most strategies: they offer less pain, not more profit.
 
+Then scale it up: `python run.py scan --list nifty50`. Ten stocks can be luck; fifty is a pattern. Read the **Summary** table at the bottom first.
+
 **Read:** Varsity, module *Technical Analysis*, the chapters on moving averages, RSI and support/resistance.
 
 ---
@@ -108,7 +110,7 @@ The five ways backtests lie, and where this repo stands on each:
 
 1. **Look-ahead bias.** The strategy uses information it couldn't have had yet. *Handled:* signals at today's close fill at tomorrow's open (`engine.py`).
 2. **Overfitting.** You tune settings until the past looks perfect, and the result is fitted to noise. *Handled by* `optimize`, which tunes on old data and tests on new.
-3. **Survivorship bias.** Your watchlist is today's winners. Nobody backtests the stocks that fell out of the Nifty. *Not handled:* this inflates every result here, buy & hold included.
+3. **Survivorship bias.** Your watchlist is today's winners. Nobody backtests the stocks that fell out of the Nifty. *Not handled:* this inflates every result here, buy & hold included. See it yourself: `python run.py compare WIPRO`, `INDUSINDBK` and `HEROMOTOCO` all left the Nifty 50 in the last year and aren't in `nifty50.txt`.
 4. **Ignoring costs and taxes.** *Costs handled; taxes not.*
 5. **Data snooping.** You try 50 ideas and keep the best one. Even with a test set, one of them will look great by luck. *Defence:* decide what you'll test before you look, and write it in your journal.
 
@@ -169,6 +171,16 @@ Log trades in a sheet (date, stock, strategy, buy/sell, price). That sheet is yo
 
 ## Phase 7: Real money (only after paper trading)
 
+**First, see what risk control does.** Intuition: a stop-loss caps how much one bad trade can hurt; position sizing caps how much of your money that trade can touch. Together they set the loss per trade: **loss ≈ position size × stop distance**.
+
+```bash
+python run.py compare ^NSEI
+python run.py compare ^NSEI --stop 10 --trailing
+python run.py compare ^NSEI --stop 8 --risk 1
+python run.py scan --list nifty50 --stop 10 --trailing
+```
+For each run, compare **Max drawdown %** and **CAGR %**. You're buying a smaller worst case with lower returns. That trade-off is the whole game, and only you can decide what's worth it. Also check **Stops hit**: a stop that triggers on every wiggle is too tight, so you get stopped out by noise and pay costs each time.
+
 Ground rules worth adopting before day one:
 - Start with an amount you could lose entirely without it hurting.
 - Risk at most 1–2% of capital per trade.
@@ -211,4 +223,5 @@ SEBI's own studies of individual equity-derivatives traders:
 - **Taxes:** STCG 20%, LTCG 12.5% over 12 months, ₹1.25 lakh exemption, all unchanged in Budget 2026. Source: sahi.com, "LTCG tax on mutual funds and stocks, Budget 2026".
 - **Retail algo framework:** effective Oct 1, 2025 (moved from Aug 1). Source: PTI via The Week, Jul 2025. 10 orders/sec threshold and static IP for order placement. Source: Zerodha Z-Connect overview of the NSE circular.
 - **F&O losses:** FY25 and FY26 figures from SEBI's studies, as reported by Finnovate (Sep 2026) and Business Standard (Jul 2025).
+- **Nifty 50 list:** BSE in, Wipro out, effective Sep 30, 2026 (NSE Indices press release, Aug 2026). No Nifty 50 changes in the March 2026 review (Bajaj Broking, Feb 2026). IndiGo and Max Healthcare replaced Hero MotoCorp and IndusInd Bank in Sep 2025 (Business Standard). Tata Motors' passenger business trades as `TMPV` after the demerger.
 - **Everything else** (metric definitions, strategy families, the five biases) is standard material, not looked up.

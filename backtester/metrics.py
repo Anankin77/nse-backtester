@@ -39,7 +39,9 @@ def summarize(equity: pd.Series, returns: pd.Series, position: pd.Series, trades
         "Trades": int(len(trades)),
         "Win rate %": 100 * wins / len(closed) if len(closed) else 0.0,
         "Avg trade %": float(closed["return_pct"].mean()) if len(closed) else 0.0,
-        "Time in market %": 100 * float(position.mean()),
+        "Time in market %": 100 * float((position > 0).mean()),
+        "Avg exposure %": 100 * float(position.mean()),
+        "Stops hit": int(trades["exit_reason"].str.startswith("stop").sum()) if "exit_reason" in trades else 0,
         "Final value": float(equity.iloc[-1]),
     }
 

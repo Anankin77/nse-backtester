@@ -26,9 +26,12 @@ def download(ticker: str, start: str, end: str | None = None, use_cache: bool = 
     """Daily OHLCV for an NSE ticker, cached as CSV in ./data/."""
     symbol = nse_symbol(ticker)
     CACHE_DIR.mkdir(exist_ok=True)
-    cache = CACHE_DIR / f"{symbol.replace('^', 'IDX_')}_{start}_{end or 'latest'}.csv"
+    # Open-ended requests are cached per calendar day, so rerunning a 50-stock scan is instant.
+    tag = end or f"to{pd.Timestamp.today().date()}"
+    safe = symbol.replace("^", "IDX_").replace("&", "and")
+    cache = CACHE_DIR / f"{safe}_{start}_{tag}.csv"
 
-    if use_cache and cache.exists() and end is not None:
+    if use_cache and cache.exists():
         return load_csv(cache)
 
     import yfinance as yf  # imported lazily so tests/demo work offline

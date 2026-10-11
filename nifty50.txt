@@ -1,0 +1,57 @@
+# NIFTY 50 constituents after the Sep 30, 2026 rebalance (BSE in, WIPRO out).
+# March 2026 review: no Nifty 50 changes. Indices rebalance every March and September;
+# check niftyindices.com and update this file when they do.
+#
+# Survivorship bias warning: these are TODAY's members. Stocks that were dropped
+# (Wipro, IndusInd Bank, Hero MotoCorp, BPCL, Britannia...) aren't here, so a backtest
+# over this list looks better than reality.
+ADANIENT
+ADANIPORTS
+APOLLOHOSP
+ASIANPAINT
+AXISBANK
+BAJAJ-AUTO
+BAJAJFINSV
+BAJFINANCE
+BEL
+BHARTIARTL
+BSE
+CIPLA
+COALINDIA
+DRREDDY
+EICHERMOT
+ETERNAL
+GRASIM
+HCLTECH
+HDFCBANK
+HDFCLIFE
+HINDALCO
+HINDUNILVR
+ICICIBANK
+INDIGO
+INFY
+ITC
+JIOFIN
+JSWSTEEL
+KOTAKBANK
+LT
+M&M
+MARUTI
+MAXHEALTH
+NESTLEIND
+NTPC
+ONGC
+POWERGRID
+RELIANCE
+SBILIFE
+SBIN
+SHRIRAMFIN
+SUNPHARMA
+TATACONSUM
+TATASTEEL
+TCS
+TECHM
+TITAN
+TMPV
+TRENT
+ULTRACEMCO

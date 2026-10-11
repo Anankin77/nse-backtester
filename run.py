@@ -47,10 +47,39 @@ def parse_params(pairs: list[str]) -> dict:
     return params
 
 
+def risk_kwargs(args) -> dict:
+    """CLI percentages -> engine fractions. Buy & hold never gets these: it stays a pure benchmark."""
+    pct = lambda v: None if v is None else v / 100  # noqa: E731
+    return {
+        "stop": pct(getattr(args, "stop", None)),
+        "trailing": getattr(args, "trailing", False),
+        "size": pct(getattr(args, "size", 100)),
+        "vol_target": pct(getattr(args, "vol_target", None)),
+        "risk": pct(getattr(args, "risk", None)),
+    }
+
+
+def risk_label(args) -> str:
+    k = risk_kwargs(args)
+    parts = []
+    if k["stop"]:
+        parts.append(f"{'trail ' if k['trailing'] else ''}stop {args.stop:g}%")
+    if k["size"] < 1:
+        parts.append(f"size {args.size:g}%")
+    if k["vol_target"]:
+        parts.append(f"vol {args.vol_target:g}%")
+    if k["risk"]:
+        parts.append(f"risk {args.risk:g}%")
+    return ", ".join(parts)
+
+
 def backtest(df, strategy, params, args, label=None):
     sig = STRATEGIES[strategy](df, **params)
     name = label or (strategy + (" " + ",".join(f"{k}={v}" for k, v in params.items()) if params else ""))
-    return run(df, sig, capital=args.capital, costs=ZERO if args.no_costs else DELIVERY, name=name)
+    extra = {} if strategy == "buyhold" else risk_kwargs(args)
+    if extra and risk_label(args) and not label:
+        name += f" [{risk_label(args)}]"
+    return run(df, sig, capital=args.capital, costs=ZERO if args.no_costs else DELIVERY, name=name, **extra)
 
 
 def cmd_test(args):
@@ -71,7 +100,8 @@ def cmd_compare(args):
     df = load(args.source, args.start, args.end)
     results = [backtest(df, s, {}, args) for s in STRATEGIES if s != "buyhold"]
     results.append(backtest(df, "buyhold", {}, args, label="Buy & hold"))
-    show(df, results, args, f"{args.source.upper()} - all strategies (default settings)")
+    extra = f" [{risk_label(args)}]" if risk_label(args) else ""
+    show(df, results, args, f"{args.source.upper()} - all strategies (default settings){extra}")
 
 
 def cmd_optimize(args):
@@ -106,50 +136,74 @@ def cmd_optimize(args):
     print("\nIf the test result is much worse than train, the 'best' settings were luck (overfitting).")
 
 
-def watchlist(tickers: list[str]) -> list[str]:
+def watchlist(tickers: list[str], list_name: str = "watchlist") -> list[str]:
     if tickers:
         return tickers
-    path = Path(__file__).resolve().parent / "watchlist.txt"
+    path = Path(__file__).resolve().parent / f"{list_name}.txt"
+    if not path.exists():
+        raise FileNotFoundError(f"{path.name} not found (try --list watchlist or --list nifty50)")
     return [ln.strip() for ln in path.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
 
 
 def cmd_scan(args):
     """Every strategy on every stock: which ideas work where?"""
-    rows = []
-    for tk in watchlist(args.tickers):
+    tickers = watchlist(args.tickers, args.list)
+    strategies = [s for s in STRATEGIES if s != "buyhold"]
+    rows, skipped = [], []
+    print(f"Scanning {len(tickers)} stocks" + (f" with {risk_label(args)}" if risk_label(args) else "") + " ...")
+    for n, tk in enumerate(tickers, 1):
         try:
             df = load(tk, args.start, args.end)
-        except ValueError as e:
-            print(f"  skip {tk}: {e}")
-            continue
-        row = {"Stock": tk.upper()}
-        for s in STRATEGIES:
-            st = backtest(df, s, {}, args).stats
-            label = "B&H" if s == "buyhold" else s
-            row[f"{label} CAGR"] = st["CAGR %"]
-            row[f"{label} MaxDD"] = st["Max drawdown %"]
-        cagrs = {s: row[f"{s} CAGR"] for s in ("sma", "rsi", "breakout")}
-        best = max(cagrs, key=cagrs.get)
-        row["Beat B&H?"] = f"yes ({best})" if cagrs[best] > row["B&H CAGR"] else "no"
-        rows.append(row)
-        print(f"  done {tk.upper()}")
+            if len(df) < 250:
+                raise ValueError("less than a year of data")
+            row = {"Stock": tk.upper(), "Years": round(len(df) / 252, 1)}
+            bh = backtest(df, "buyhold", {}, args, label="Buy & hold").stats
+            row["B&H CAGR"], row["B&H MaxDD"] = bh["CAGR %"], bh["Max drawdown %"]
+            for s in strategies:
+                st = backtest(df, s, {}, args).stats
+                row[f"{s} CAGR"], row[f"{s} MaxDD"] = st["CAGR %"], st["Max drawdown %"]
+            best = max(strategies, key=lambda s: row[f"{s} CAGR"])
+            row["Beat B&H?"] = f"yes ({best})" if row[f"{best} CAGR"] > row["B&H CAGR"] else "no"
+            rows.append(row)
+            print(f"  [{n}/{len(tickers)}] {tk.upper()}")
+        except Exception as e:  # one bad ticker shouldn't kill a 50-stock scan
+            skipped.append(tk)
+            print(f"  [{n}/{len(tickers)}] skip {tk}: {e}")
 
+    if not rows:
+        raise ValueError("no stocks could be scanned")
     out = pd.DataFrame(rows).set_index("Stock").round(1)
     print(f"\nCAGR % and max drawdown % per strategy, {args.start} -> {args.end or 'today'}\n")
     print(out.to_string())
-    beat = (out["Beat B&H?"] != "no").sum()
-    print(f"\nA strategy beat buy & hold on {beat} of {len(out)} stocks.")
+
+    # The summary is the point: does any idea work broadly, or only on a lucky few?
+    summary = {}
+    for s in strategies:
+        summary[s] = {
+            "Beat B&H on CAGR": f"{(out[f'{s} CAGR'] > out['B&H CAGR']).sum()} / {len(out)}",
+            "Smaller drawdown than B&H": f"{(out[f'{s} MaxDD'] > out['B&H MaxDD']).sum()} / {len(out)}",
+            "Median CAGR %": round(out[f"{s} CAGR"].median(), 1),
+            "Median MaxDD %": round(out[f"{s} MaxDD"].median(), 1),
+        }
+    summary["Buy & hold"] = {"Beat B&H on CAGR": "-", "Smaller drawdown than B&H": "-",
+                             "Median CAGR %": round(out["B&H CAGR"].median(), 1),
+                             "Median MaxDD %": round(out["B&H MaxDD"].median(), 1)}
+    print("\nSummary across all stocks\n")
+    print(pd.DataFrame(summary).to_string())
+    if skipped:
+        print(f"\nSkipped: {', '.join(skipped)}")
+
     OUT.mkdir(exist_ok=True)
-    path = OUT / "scan.csv"
+    path = OUT / f"scan_{args.list if not args.tickers else 'custom'}.csv"
     out.to_csv(path)
-    print(f"Saved to {path}")
+    print(f"\nSaved to {path}")
 
 
 def cmd_today(args):
     """Current signal for each stock, for paper trading. Run after market close (3:30 pm)."""
     start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")  # enough for SMA 200
     rows = []
-    for tk in watchlist(args.tickers):
+    for tk in watchlist(args.tickers, args.list):
         try:
             df = download(tk, start, None, use_cache=False)
         except ValueError as e:
@@ -186,13 +240,23 @@ def main():
     p = argparse.ArgumentParser(description="Backtest trading strategies on NSE stocks.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def common(sp):
-        sp.add_argument("source", help="NSE ticker (RELIANCE, TCS, ^NSEI), a .csv file, or DEMO")
+    def risk_opts(sp):
+        g = sp.add_argument_group("stop-loss and position sizing (percent values)")
+        g.add_argument("--stop", type=float, help="stop-loss, %% below entry, e.g. 10")
+        g.add_argument("--trailing", action="store_true", help="stop trails the highest close since entry")
+        g.add_argument("--size", type=float, default=100, help="%% of equity per trade (default 100)")
+        g.add_argument("--vol-target", type=float, help="size so the position's volatility is ~this %%/yr, e.g. 15")
+        g.add_argument("--risk", type=float, help="%% of equity lost if the stop hits, e.g. 1 (needs --stop)")
+
+    def common(sp, source=True):
+        if source:
+            sp.add_argument("source", help="NSE ticker (RELIANCE, TCS, ^NSEI), a .csv file, or DEMO")
         sp.add_argument("--start", default="2015-01-01")
         sp.add_argument("--end", default=None, help=f"default: today ({date.today()})")
         sp.add_argument("--capital", type=float, default=100_000)
         sp.add_argument("--no-costs", action="store_true", help="ignore taxes, charges and slippage")
         sp.add_argument("--no-plot", action="store_true")
+        risk_opts(sp)
 
     t = sub.add_parser("test", help="one strategy vs buy & hold")
     common(t)
@@ -211,15 +275,14 @@ def main():
     o.set_defaults(func=cmd_optimize)
 
     sc = sub.add_parser("scan", help="all strategies across many stocks (watchlist.txt by default)")
-    sc.add_argument("tickers", nargs="*", help="e.g. TCS ITC SBIN; empty = watchlist.txt")
-    sc.add_argument("--start", default="2015-01-01")
-    sc.add_argument("--end", default=None)
-    sc.add_argument("--capital", type=float, default=100_000)
-    sc.add_argument("--no-costs", action="store_true")
+    sc.add_argument("tickers", nargs="*", help="e.g. TCS ITC SBIN; empty = the --list file")
+    sc.add_argument("--list", default="watchlist", help="watchlist (default) or nifty50, i.e. <name>.txt")
+    common(sc, source=False)
     sc.set_defaults(func=cmd_scan)
 
     td = sub.add_parser("today", help="current buy/sell signals for paper trading")
-    td.add_argument("tickers", nargs="*", help="empty = watchlist.txt")
+    td.add_argument("tickers", nargs="*", help="empty = the --list file")
+    td.add_argument("--list", default="watchlist")
     td.set_defaults(func=cmd_today)
 
     args = p.parse_args()
