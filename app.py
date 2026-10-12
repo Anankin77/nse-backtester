@@ -5,6 +5,7 @@ Same engine as the command line, so the numbers are identical.
 """
 from __future__ import annotations
 
+import io
 import os
 import zlib
 from datetime import date
@@ -18,11 +19,15 @@ from plotly.subplots import make_subplots
 from backtester import DELIVERY, STRATEGIES, ZERO, download, run, synthetic
 from backtester.analysis import (PRESETS, RANK_BY, SCAN_STRATEGIES, drop_incomplete_bar, ranked,
                                  signal_row, strategy_table, tournament)
+from backtester.data import stored_status
+from backtester.github_file import GitHubError, GitHubFile
 
 ROOT = Path(__file__).resolve().parent
 OFFLINE = bool(os.environ.get("BACKTESTER_OFFLINE"))  # fake prices, for testing without internet
 
 BLUE, GREY, GREEN, RED, AMBER = "#58a6ff", "#8b949e", "#3fb950", "#f85149", "#d29922"
+# No floating toolbar: on phones it covers the legend. Zoom by dragging, double-tap to reset.
+CHART_CONFIG = {"displayModeBar": False}
 
 # slider ranges per strategy family: (min, max, default)
 SPEC = {
@@ -44,6 +49,15 @@ st.markdown(
       h1 {font-weight: 600 !important; letter-spacing: -0.01em;}
       [data-testid="stMetricValue"] {font-size: 1.45rem;}
       .lead {color: #8b949e; font-size: 1.05rem; margin-top: -0.6rem;}
+      /* Phones: two numbers per row instead of one tall stack */
+      @media (max-width: 640px) {
+        .block-container {padding-top: 2.2rem; padding-left: 1rem; padding-right: 1rem;}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {flex-flow: row wrap; gap: 0.6rem 1rem;}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) > [data-testid="stColumn"] {
+          flex: 1 1 calc(50% - 0.5rem) !important; min-width: calc(50% - 0.5rem) !important;
+          width: calc(50% - 0.5rem) !important;}
+        [data-testid="stMetricValue"] {font-size: 1.2rem;}
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -59,16 +73,37 @@ def read_list(name: str) -> list[str]:
     return [ln.strip() for ln in path.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
 
 
-@st.cache_data(show_spinner=False, ttl=6 * 3600)
 def prices(ticker: str, start: str, end: str | None) -> pd.DataFrame:
+    # The version changes when the daily job saves new prices, so the cache never serves yesterday's.
+    return _prices(ticker, start, end, version=f"{stored_status().get('updated')}|{date.today()}")
+
+
+@st.cache_data(show_spinner=False, ttl=6 * 3600, max_entries=300)
+def _prices(ticker: str, start: str, end: str | None, version: str) -> pd.DataFrame:
     if ticker == "DEMO" or OFFLINE:
         df = synthetic(1500, seed=zlib.crc32(ticker.encode()) % 1000)
         return df.loc[start:end] if end else df.loc[start:]
-    return download(ticker, start, end)
+    try:
+        return download(ticker, start, end)
+    except Exception as e:  # Yahoo can refuse hosted servers; say what to do instead of crashing
+        msg = str(e).splitlines()[0][:120] if str(e) else type(e).__name__
+        why = "Yahoo sent no data" if msg.startswith("No data") else f"Yahoo said: {msg}"
+        raise ValueError(f"Couldn't load {ticker}: {why}. If the symbol is right, add it to watchlist.txt "
+                         "on GitHub and the price job saves it within a few minutes.") from e
+
+
+def prices_note() -> tuple[str, bool]:
+    """Date of the saved prices, and whether that looks stale (the daily job may be failing)."""
+    last = stored_status().get("last_bar")
+    if OFFLINE or not last:
+        return "", False
+    last = pd.Timestamp(last)
+    stale = (pd.Timestamp.today().normalize() - last).days > 4   # more than a weekend plus a holiday
+    return f"{last:%a %d %b %Y}", stale
 
 
 def fresh_prices(ticker: str) -> pd.DataFrame:
-    """Latest data, never from the day cache (used for today's signals)."""
+    """Saved prices, or for unsaved tickers a fresh Yahoo download (used for today's signals)."""
     if OFFLINE:
         return synthetic(500, seed=zlib.crc32(ticker.encode()) % 1000)
     start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")
@@ -99,6 +134,12 @@ def sidebar_settings() -> dict:
                              help="0 = off. Needs a stop. Position = risk / stop.")
         st.caption("A 10% stop usually sits inside normal noise. Try 20%.")
     sb.caption("These apply to every page. Not investment advice.")
+    day, stale = prices_note()
+    if stale:
+        sb.warning(f"Prices stop at {day}. The daily update may be failing: "
+                   "check GitHub > Actions > Update prices.", icon=":material/schedule:")
+    elif day:
+        sb.caption(f":material/schedule: Prices up to {day}. Updated weekdays around 4:40 pm.")
 
     risk = {"stop": stop / 100 or None, "trailing": bool(trailing and stop), "size": size / 100,
             "vol_target": vol / 100 or None, "risk": (risk_pct / 100 or None) if stop else None}
@@ -232,7 +273,7 @@ def backtest():
            f"Invested {s['Time in market %']:.0f}% of the time.")
     (st.success if d_ret > 0 else st.info)(msg)
 
-    st.plotly_chart(backtest_chart(df, res, bh))
+    st.plotly_chart(backtest_chart(df, res, bh), config=CHART_CONFIG)
 
     with st.expander(f"Trade log ({len(res.trades)} trades)"):
         t = res.trades
@@ -421,7 +462,7 @@ def show_competition(r):
                                xanchor="left", font=dict(color=AMBER, size=11))
         fig.update_layout(height=380, hovermode="x unified", yaxis_title="Portfolio value (Rs)",
                           margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=1.12, x=0))
-        st.plotly_chart(fig)
+        st.plotly_chart(fig, config=CHART_CONFIG)
 
     if r["skipped"]:
         st.caption("Skipped: " + ", ".join(r["skipped"]))
@@ -434,7 +475,8 @@ def today():
     which = st.segmented_control("Companies", ["My watchlist", "Nifty 50"], default="My watchlist",
                                  required=True, key="today_list")
     names = read_list("watchlist" if which == "My watchlist" else "nifty50")
-    st.caption("Best checked after 3:45 pm, when the day's prices are final.")
+    st.caption("Prices refresh every weekday around 4:40 pm. Before that, signals are from the previous "
+               "trading day, which is fine: every signal acts at the next open anyway.")
     if st.button("Get signals", type="primary", icon=":material/refresh:"):
         rows, partial, skipped = [], False, []
         bar = st.progress(0.0, text="Starting...")
@@ -475,19 +517,70 @@ def today():
                "Log fake trades in Paper log and follow one strategy for 6-8 weeks.")
     if skipped:
         st.caption("Skipped: " + ", ".join(skipped))
+    failed = {k: v for k, v in stored_status().get("failed", {}).items() if k in set(sig["Stock"])}
+    if failed:
+        st.caption("Not refreshed in the last daily update (older prices shown): " + ", ".join(failed))
+
+
+LOG_COLS = ["date", "stock", "strategy", "side", "price", "qty", "note"]
+LOG_FILE = ROOT / "paper_trades.csv"
+
+
+def log_repo() -> GitHubFile | None:
+    """The private log repo from the app's secrets ([paper_log] repo, token), if set up."""
+    try:
+        conf = st.secrets.get("paper_log") or {}
+    except Exception:  # no secrets file at all
+        conf = {}
+    if conf.get("repo") and conf.get("token"):
+        return GitHubFile(conf["repo"], conf.get("path", "paper_trades.csv"), conf["token"],
+                          api=conf.get("api", "https://api.github.com"))
+    return None
+
+
+def load_log() -> dict:
+    """Read the log once per visit: {df, sha, where}. Raises GitHubError if the repo can't be read."""
+    repo = log_repo()
+    if repo:
+        text, sha = repo.read()
+        where = f"your private repo {repo.repo}"
+    else:
+        text, sha = (LOG_FILE.read_text() if LOG_FILE.exists() else None), None
+        where = "paper_trades.csv next to the app"
+    if text and text.strip():
+        # Text columns stay text even when blank, or the editor refuses to open them.
+        df = pd.read_csv(io.StringIO(text), dtype={c: str for c in ["date", "stock", "strategy", "side", "note"]})
+        df = df.reindex(columns=LOG_COLS).dropna(how="all").reset_index(drop=True)
+    else:
+        df = pd.DataFrame({c: pd.Series(dtype="object") for c in LOG_COLS})
+    return {"df": df, "sha": sha, "where": where, "github": repo is not None, "v": 0}
+
+
+def save_log(log: dict, edited: pd.DataFrame):
+    edited = edited.dropna(how="all").reset_index(drop=True)   # blank rows from a stray "+"
+    edited["qty"] = pd.to_numeric(edited["qty"], errors="coerce").round().astype("Int64")
+    text = edited.to_csv(index=False)
+    repo = log_repo()
+    if repo:
+        log["sha"] = repo.write(text, log["sha"], f"Paper log: {len(edited)} rows")
+    else:
+        LOG_FILE.write_text(text)
+    # New base data, fresh editor (otherwise the editor re-applies the same edits on top).
+    log["df"], log["v"] = edited.reset_index(drop=True), log["v"] + 1
 
 
 def paper_log():
     st.title("Paper log")
     lead("Fake trades only. Add a row each time a signal says BUY or SELL, then press Save.")
-    path = ROOT / "paper_trades.csv"
-    cols = ["date", "stock", "strategy", "side", "price", "qty", "note"]
-    if path.exists():
-        log = pd.read_csv(path, dtype={"date": str, "note": str}).reindex(columns=cols)
-    else:
-        log = pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
+    if "paper" not in st.session_state:
+        try:
+            st.session_state["paper"] = load_log()
+        except GitHubError as e:
+            st.error(f"Couldn't open the paper log. {e}")
+            return
+    log = st.session_state["paper"]
     edited = st.data_editor(
-        log, num_rows="dynamic", hide_index=True, key="log_editor",
+        log["df"], num_rows="dynamic", hide_index=True, key=f"log_editor_{log['v']}",
         column_config={
             "date": st.column_config.TextColumn("Date", help="YYYY-MM-DD"),
             "stock": st.column_config.TextColumn("Stock"),
@@ -498,9 +591,25 @@ def paper_log():
             "note": st.column_config.TextColumn("Note"),
         },
     )
-    if st.button("Save", type="primary", icon=":material/save:"):
-        edited.to_csv(path, index=False)
-        st.success(f"Saved {len(edited)} rows to paper_trades.csv on this computer.")
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Save", type="primary", icon=":material/save:", width="stretch"):
+        try:
+            save_log(log, edited)
+            st.session_state["paper_saved"] = len(edited)
+            st.rerun()
+        except GitHubError as e:
+            st.error(str(e))
+    if c2.button("Reload", icon=":material/refresh:", width="stretch",
+                 help="Fetch the latest copy, e.g. after saving on another device. Unsaved edits are lost."):
+        st.session_state.pop("paper", None)
+        st.rerun()
+    if n := st.session_state.pop("paper_saved", None):
+        st.success(f"Saved {n} row{'s' if n != 1 else ''} to {log['where']}.")
+    elif log["github"]:
+        st.caption(f":material/lock: Saved in {log['where']}.")
+    else:
+        st.caption(f"Saved in {log['where']}. On the hosted app this file is wiped whenever the app restarts: "
+                   "set up the private log repo (see README) to keep it.")
 
     e = edited.dropna(subset=["stock", "side", "price", "qty"]).copy()
     if len(e):

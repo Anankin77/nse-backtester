@@ -40,7 +40,54 @@ Opens in your browser at http://localhost:8501, in a dark theme. It runs on your
 | **Paper log** | A table for your fake trades, saved to `paper_trades.csv` |
 | **Learn** | The learning path, one phase per expandable section |
 
-Shared settings (dates, capital, costs, stop-loss, position size) sit in the sidebar under the menu and apply to every page. For a quick look without internet, choose the company `DEMO` on the Backtest page.
+Shared settings (dates, capital, costs, stop-loss, position size) sit in the sidebar under the menu and apply to every page. The sidebar also shows the date of the latest prices. For a quick look without internet, choose the company `DEMO` on the Backtest page.
+
+## On your phone, with the laptop off
+
+The same app can run on Streamlit Community Cloud (free), private to you.
+
+How it fits together:
+
+1. **Prices.** A GitHub Actions job (`.github/workflows/prices.yml`) downloads every stock in `watchlist.txt` and `nifty50.txt` from Yahoo at 4:37 pm and 6:37 pm IST on weekdays, and saves them in `prices/`. The app reads `prices/`, so it never has to reach Yahoo itself.
+2. **App.** Streamlit Cloud runs `app.py` from this repo and updates itself whenever the repo changes, including after each day's prices.
+3. **Paper log.** Saved in a separate private repo (`nse-paper-log`), so it survives app restarts and is the same on every device. This repo stays code and prices only.
+
+### One-time setup (about 15 minutes)
+
+**A. Private repo for the paper log**
+
+1. GitHub > **New repository**. Name `nse-paper-log`, choose **Private**, tick **Add a README file**, create.
+2. GitHub > your photo > **Settings** > **Developer settings** > **Personal access tokens** > **Fine-grained tokens** > **Generate new token**.
+   - Name: `nse-paper-log`. Expiration: the longest offered.
+   - Repository access: **Only select repositories** > `nse-paper-log`.
+   - Permissions > Repository permissions > **Contents: Read and write**.
+   - Generate, then copy the token (starts with `github_pat_`). GitHub shows it only once.
+
+The token can only touch that one repo, and only lives in the app's secret settings, never in this repo.
+
+**B. The hosted app**
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) and **Continue with GitHub** (as Anankin77).
+2. **Create app** > deploy from GitHub: repository `Anankin77/nse-backtester`, branch `main`, main file `app.py`.
+3. **Advanced settings**: Python 3.12. In **Secrets**, paste (with your token):
+   ```toml
+   [paper_log]
+   repo = "Anankin77/nse-paper-log"
+   token = "github_pat_..."
+   ```
+4. **Deploy**. The first start takes a few minutes.
+5. Right away: the app's **Settings** > **Sharing** > **Only specific people can view this app**, and add your Gmail. Without this the app is public. (The free plan allows one private app.)
+6. On your phone, open the app's link, sign in with Google, then **Add to Home Screen**.
+
+**C. Laptop (optional).** To use the same paper log there, create `.streamlit/secrets.toml` with the same three lines. It's in `.gitignore`, so it never gets pushed. If you already have trades in `paper_trades.csv`, upload that file to `nse-paper-log` (Add file > Upload files).
+
+### Day to day
+
+- Prices update once a day. Before ~4:40 pm you see the previous trading day, which is fine: every signal acts at the next open.
+- The app sleeps after 12 hours without visitors. Opening it then shows a wake-up button; it takes about a minute.
+- To follow a new stock, add it to `watchlist.txt` (you can edit it on GitHub from your phone). That starts the price job; the stock appears a few minutes later.
+- Run the price job by hand: GitHub > **Actions** > **Update prices** > **Run workflow**.
+- If the job fails, GitHub emails you, and the sidebar warns when prices are more than 4 days old. A bad download never overwrites good saved prices.
 
 ## Command line
 
@@ -55,13 +102,14 @@ Shared settings (dates, capital, costs, stop-loss, position size) sit in the sid
 | `python run.py scan --list nifty50` | Same, across all 50 Nifty stocks, with a summary of how often each strategy wins |
 | `python run.py compare SBIN --stop 10 --trailing` | Add a 10% trailing stop-loss to every strategy |
 | `python run.py test TCS --strategy sma --stop 8 --risk 1` | Risk 1% of equity per trade with an 8% stop |
-| `python run.py today` | Today's buy/sell signals for your watchlist, for paper trading (run after 3:30 pm) |
+| `python run.py today` | Today's buy/sell signals for your watchlist, for paper trading |
+| `python run.py update` | Refresh `prices/` from Yahoo. GitHub does this daily; you shouldn't need it |
 
 **New to this? Start with the [learning path](docs/LEARNING.md).**
 
 Common options: `--start 2015-01-01`, `--end 2024-12-31`, `--capital 50000`, `--no-costs`, `--no-plot`.
 
-Tickers are plain NSE symbols (`HDFCBANK`, `SBIN`, `TMPV`); `.NS` is added for you. Data comes from Yahoo Finance and is cached in `data/` for the day, so rerunning a scan is instant. Charts and trade logs go to `results/`.
+Tickers are plain NSE symbols (`HDFCBANK`, `SBIN`, `TMPV`); `.NS` is added for you. Prices for your watchlist and the Nifty 50 come from `prices/` (saved daily by GitHub, see above). Any other ticker is downloaded from Yahoo Finance and cached in `data/` for the day. Charts and trade logs go to `results/`.
 
 ## Stop-losses and position sizing
 
@@ -108,13 +156,13 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 2. **Real costs.** Zerodha delivery rates (checked Oct 2026): STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`). The flat DP charge (₹15.34 per sell) and capital-gains tax are not included, so small orders and frequent traders look better than reality.
 3. **Overfitting check.** `optimize` tunes on old data and reports performance on newer, unseen data. If the test result collapses, the "best" settings were luck.
 4. **Conservative stops.** Gaps fill at the open, not the stop price. Trailing stops trail closes, not intraday highs, because daily data can't tell whether the high came before the low.
-5. **Tested.** 17 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, and that trade-by-trade returns reconcile with the equity curve.
+5. **Tested.** 37 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, trade-by-trade returns reconciling with the equity curve, the competition, the price job (a bad download never replaces saved prices) and the paper log's private repo (saving from two devices is caught, not overwritten).
 
 ## Limits (read before trading real money)
 
 - Long-only, one stock at a time. `scan` tests stocks separately; it doesn't run a combined portfolio.
 - **Survivorship bias:** `nifty50.txt` holds today's members, so stocks that crashed out of the index are missing and results look better than reality.
-- Daily data only, so no intraday strategies.
+- Daily data only, so no intraday strategies. Saved prices refresh once a day, after the close.
 - Cash earns 0% while out of the market (in reality you'd park it in a liquid fund).
 - Yahoo data is free but occasionally has gaps or bad ticks.
 - A good backtest is necessary, not sufficient. Paper trade a strategy for a few months before using real money.
@@ -125,9 +173,13 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 app.py                   web app (streamlit)
 start.sh                 one-command launcher
 run.py                   command-line interface
+prices/                  daily prices, saved by GitHub (don't edit)
+.github/workflows/       the daily price job
 backtester/
   analysis.py            scan rows, summaries, today's signals (shared by app and CLI)
-  data.py                download / cache / CSV / synthetic prices
+  data.py                saved prices / download / cache / CSV / synthetic prices
+  update.py              the daily price download
+  github_file.py         paper log in a private GitHub repo
   strategies.py          indicators + strategy rules
   engine.py              the simulation (timing, costs, trade log)
   costs.py               Indian delivery charges

@@ -6,3 +6,4 @@ venv/
 data/
 results/
 paper_trades.csv
+.streamlit/secrets.toml
