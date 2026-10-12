@@ -1,6 +1,6 @@
 """Web interface for nse-backtester.
 
-Run:  streamlit run app.py        (or ./start.sh)
+Run:  ./start.sh      (or: streamlit run app.py)
 Same engine as the command line, so the numbers are identical.
 """
 from __future__ import annotations
@@ -16,45 +16,41 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from backtester import DELIVERY, STRATEGIES, ZERO, download, run, synthetic
-from backtester.analysis import SCAN_STRATEGIES, drop_incomplete_bar, signal_row, stock_row, summary
-from backtester.metrics import table
+from backtester.analysis import (PRESETS, RANK_BY, SCAN_STRATEGIES, drop_incomplete_bar, ranked,
+                                 signal_row, strategy_table, tournament)
 
 ROOT = Path(__file__).resolve().parent
 OFFLINE = bool(os.environ.get("BACKTESTER_OFFLINE"))  # fake prices, for testing without internet
 
-BLUE, GREY, GREEN, RED, ORANGE = "#1f4e79", "#8a8a8a", "#4f8a3c", "#c0504d", "#d08c2a"
+BLUE, GREY, GREEN, RED, AMBER = "#58a6ff", "#8b949e", "#3fb950", "#f85149", "#d29922"
 
-LABELS = {
-    "sma": "SMA crossover: trend following",
-    "rsi": "RSI: mean reversion",
-    "breakout": "Breakout: momentum",
-}
-BLURB = {
-    "sma": "Hold while the fast moving average is above the slow one.",
-    "rsi": "Buy when oversold (RSI low), sell when overbought (RSI high).",
-    "breakout": "Buy a new N-day high, sell a new M-day low.",
-}
-# name: (min, max, default)
+# slider ranges per strategy family: (min, max, default)
 SPEC = {
     "sma": {"fast": (5, 100, 50), "slow": (20, 300, 200)},
     "rsi": {"period": (5, 30, 14), "buy_below": (10, 40, 30), "sell_above": (60, 90, 70)},
     "breakout": {"lookback": (10, 200, 55), "exit_lookback": (5, 100, 20)},
+}
+BLURB = {
+    "sma": "Trend following: hold while the fast moving average is above the slow one.",
+    "rsi": "Mean reversion: buy when the stock is oversold, sell when it is overbought.",
+    "breakout": "Momentum: buy a new N-day high, sell a new M-day low.",
 }
 
 st.set_page_config(page_title="NSE Backtester", layout="wide")
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 2.2rem; max-width: 1400px;}
-      [data-testid="stMetricValue"] {font-size: 1.5rem;}
-      h1 {font-size: 1.7rem !important; margin-bottom: 0;}
+      .block-container {padding-top: 3rem; max-width: 1180px;}
+      h1 {font-weight: 600 !important; letter-spacing: -0.01em;}
+      [data-testid="stMetricValue"] {font-size: 1.45rem;}
+      .lead {color: #8b949e; font-size: 1.05rem; margin-top: -0.6rem;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ---------------------------------------------------------------- data
+# ================================================================ data
 
 def read_list(name: str) -> list[str]:
     path = ROOT / f"{name}.txt"
@@ -73,229 +69,377 @@ def prices(ticker: str, start: str, end: str | None) -> pd.DataFrame:
 
 def fresh_prices(ticker: str) -> pd.DataFrame:
     """Latest data, never from the day cache (used for today's signals)."""
-    start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")
     if OFFLINE:
         return synthetic(500, seed=zlib.crc32(ticker.encode()) % 1000)
+    start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")
     return download(ticker, start, None, use_cache=False)
 
 
-# ---------------------------------------------------------------- sidebar
-
-st.sidebar.markdown("### Settings")
-nifty = read_list("nifty50")
-pick = st.sidebar.selectbox("Stock", ["RELIANCE", "^NSEI", *[s for s in nifty if s != "RELIANCE"], "DEMO"],
-                            help="^NSEI is the Nifty 50 index. DEMO is fake prices that work offline.")
-typed = st.sidebar.text_input("...or type any NSE symbol", placeholder="e.g. IRCTC").strip().upper()
-ticker = typed or pick
-
-c1, c2 = st.sidebar.columns(2)
-start = c1.date_input("From", date(2015, 1, 1), min_value=date(2000, 1, 1), max_value=date.today())
-end = c2.date_input("To", date.today(), min_value=date(2000, 1, 1), max_value=date.today())
-capital = st.sidebar.number_input("Starting capital (Rs)", 10_000, 100_000_000, 100_000, step=10_000)
-use_costs = st.sidebar.checkbox("Include Zerodha charges and slippage", value=True)
-
-st.sidebar.markdown("### Strategy")
-strategy = st.sidebar.selectbox("Rule", list(LABELS), format_func=LABELS.get)
-st.sidebar.caption(BLURB[strategy])
-params = {k: st.sidebar.slider(k.replace("_", " "), lo, hi, dflt) for k, (lo, hi, dflt) in SPEC[strategy].items()}
-
-with st.sidebar.expander("Stop-loss and position size"):
-    stop_pct = st.slider("Stop-loss %", 0, 40, 0, help="0 = no stop. Sell if price falls this far below entry.")
-    trailing = st.checkbox("Trailing", help="The stop follows the highest close since entry.", disabled=stop_pct == 0)
-    size_pct = st.slider("Share of money per trade %", 10, 100, 100)
-    vol_pct = st.slider("Volatility target %/yr", 0, 40, 0, help="0 = off. Calm stock gets a bigger position.")
-    risk_pct = st.slider("Max loss per trade % of equity", 0.0, 5.0, 0.0, step=0.25,
-                         help="0 = off. Needs a stop. Position = risk / stop.", disabled=stop_pct == 0)
-st.sidebar.caption("Tip: a 10% stop is usually inside normal noise. Try 20%.")
-
-risk = {
-    "stop": stop_pct / 100 or None,
-    "trailing": trailing and stop_pct > 0,
-    "size": size_pct / 100,
-    "vol_target": vol_pct / 100 or None,
-    "risk": risk_pct / 100 or None,
-}
-costs = DELIVERY if use_costs else ZERO
-end_arg = None if end >= date.today() else end.isoformat()
-
-# ---------------------------------------------------------------- compute
+def lead(text: str):
+    st.markdown(f'<p class="lead">{text}</p>', unsafe_allow_html=True)
 
 
-def simulate(df, name, p=None, with_risk=True, label=None):
-    sig = STRATEGIES[name](df, **(p or {}))
-    kw = risk if (with_risk and name != "buyhold") else {}
-    return run(df, sig, capital=capital, costs=costs, name=label or name, **kw)
+# ================================================================ sidebar settings (shared by every page)
 
+def sidebar_settings() -> dict:
+    sb = st.sidebar
+    sb.markdown("#### Settings")
+    c1, c2 = sb.columns(2)
+    start = c1.date_input("From", date(2015, 1, 1), min_value=date(2000, 1, 1), max_value=date.today(), key="start")
+    end = c2.date_input("To", date.today(), min_value=date(2000, 1, 1), max_value=date.today(), key="end")
+    capital = sb.number_input("Capital (Rs)", 10_000, 100_000_000, 100_000, step=10_000, key="capital")
+    use_costs = sb.toggle("Zerodha charges and slippage", True, key="use_costs")
+    with sb.expander("Stop-loss and position size"):
+        stop = st.slider("Stop-loss %", 0, 40, 0, key="stop", help="0 = off. Sell if price falls this far below entry.")
+        trailing = st.checkbox("Trailing stop", key="trailing", disabled=stop == 0,
+                               help="The stop follows the highest close since entry.")
+        size = st.slider("Money per trade %", 10, 100, 100, key="size")
+        vol = st.slider("Volatility target %/yr", 0, 40, 0, key="vol", help="0 = off. Calm stocks get bigger positions.")
+        risk_pct = st.slider("Max loss per trade %", 0.0, 5.0, 0.0, step=0.25, key="risk", disabled=stop == 0,
+                             help="0 = off. Needs a stop. Position = risk / stop.")
+        st.caption("A 10% stop usually sits inside normal noise. Try 20%.")
+    sb.caption("These apply to every page. Not investment advice.")
 
-def risk_text() -> str:
+    risk = {"stop": stop / 100 or None, "trailing": bool(trailing and stop), "size": size / 100,
+            "vol_target": vol / 100 or None, "risk": (risk_pct / 100 or None) if stop else None}
     parts = []
-    if risk["stop"]:
-        parts.append(f"{'trailing ' if risk['trailing'] else ''}stop {stop_pct}%")
-    if size_pct < 100:
-        parts.append(f"size {size_pct}%")
-    if risk["vol_target"]:
-        parts.append(f"vol target {vol_pct}%")
+    if stop:
+        parts.append(f"{'trailing ' if risk['trailing'] else ''}stop {stop}%")
+    if size < 100:
+        parts.append(f"{size}% per trade")
+    if vol:
+        parts.append(f"vol target {vol}%")
     if risk["risk"]:
-        parts.append(f"risk {risk_pct:g}%")
-    return ", ".join(parts)
+        parts.append(f"max loss {risk_pct:g}%/trade")
+    return {
+        "start": start, "end": end, "start_s": start.isoformat(),
+        "end_s": None if end >= date.today() else end.isoformat(),
+        "capital": capital, "costs": DELIVERY if use_costs else ZERO, "use_costs": use_costs,
+        "risk": risk, "risk_text": ", ".join(parts),
+    }
 
 
-st.title("NSE Backtester")
-st.caption("Replay the past with real Indian trading costs before risking money. Not investment advice.")
+def fingerprint(*extra) -> tuple:
+    """Everything that changes a result, to tell when shown results are out of date."""
+    return (cfg["start"], cfg["end"], cfg["capital"], cfg["use_costs"], tuple(cfg["risk"].items()), *extra)
 
-if start >= end:
-    st.error("The start date must be before the end date.")
-    st.stop()
-try:
-    with st.spinner(f"Loading {ticker}..."):
-        df = prices(ticker, start.isoformat(), end_arg)
-    if len(df) < 250:
-        st.error(f"Only {len(df)} trading days of data for {ticker}. Need at least a year; widen the dates.")
-        st.stop()
-    res = simulate(df, strategy, params, label=LABELS[strategy].split(":")[0])
-    bh = simulate(df, "buyhold", with_risk=False, label="Buy & hold")
-except ValueError as e:
-    st.error(str(e))
-    st.stop()
 
-tab_bt, tab_cmp, tab_scan, tab_today, tab_log, tab_learn = st.tabs(
-    ["Backtest", "Compare", "Scan", "Today", "Paper log", "Learn"])
+def stale_note(saved_fp, now_fp):
+    if saved_fp != now_fp:
+        st.caption(":material/info: Settings changed since this run. Press the button again to update.")
 
-# ---------------------------------------------------------------- tab: backtest
 
-with tab_bt:
-    s, b = res.stats, bh.stats
-    head = f"**{ticker}**, {df.index[0].date()} to {df.index[-1].date()}, {LABELS[strategy].split(':')[0]}"
-    if risk_text():
-        head += f" with {risk_text()}"
-    st.markdown(head)
+# ================================================================ charts
 
-    cols = st.columns(6)
-    cols[0].metric("Yearly return (CAGR)", f"{s['CAGR %']:.1f}%", f"{s['CAGR %'] - b['CAGR %']:+.1f} vs hold")
-    cols[1].metric("Worst fall", f"{s['Max drawdown %']:.1f}%", f"{s['Max drawdown %'] - b['Max drawdown %']:+.1f} vs hold")
-    cols[2].metric("Sharpe", f"{s['Sharpe']:.2f}", f"{s['Sharpe'] - b['Sharpe']:+.2f} vs hold")
-    cols[3].metric("Trades", f"{s['Trades']}")
-    cols[4].metric("Win rate", f"{s['Win rate %']:.0f}%")
-    cols[5].metric("Final value", f"Rs {s['Final value']:,.0f}", f"{s['Final value'] - b['Final value']:+,.0f} vs hold")
-
-    d_ret, d_dd = s["CAGR %"] - b["CAGR %"], s["Max drawdown %"] - b["Max drawdown %"]
-    verdict = (
-        f"Versus simply holding: returns {abs(d_ret):.1f} points a year **{'higher' if d_ret > 0 else 'lower'}**, "
-        f"worst fall {abs(d_dd):.1f} points **{'smaller' if d_dd > 0 else 'larger'}**. "
-        f"You were invested {s['Time in market %']:.0f}% of the time."
-    )
-    (st.success if d_ret > 0 else st.info)(verdict)
-
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.42, 0.33, 0.25],
-                        subplot_titles=("Price and trades", "Portfolio value", "Drawdown from peak, %"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Close", line=dict(color=GREY, width=1)), 1, 1)
+def backtest_chart(df, res, bh) -> go.Figure:
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.42, 0.33, 0.25],
+                        subplot_titles=("Price and trades", "Portfolio value (Rs)", "Fall from peak, %"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Price", line=dict(color=GREY, width=1)), 1, 1)
     t = res.trades
     if len(t):
         fig.add_trace(go.Scatter(x=t["entry_date"], y=t["entry_price"], mode="markers", name="Buy",
                                  marker=dict(symbol="triangle-up", color=GREEN, size=10),
-                                 customdata=t["return_pct"], hovertemplate="Buy %{y:.2f}<extra></extra>"), 1, 1)
+                                 hovertemplate="Buy %{y:.2f}<extra></extra>"), 1, 1)
         done = t[~t["still_open"]]
-        for reason, color, sym, nm in [("signal", RED, "triangle-down", "Sell (signal)"),
-                                       ("stop", ORANGE, "x", "Sell (stop)")]:
+        for reason, color, sym, nm in [("signal", RED, "triangle-down", "Sell"), ("stop", AMBER, "x", "Stop-loss")]:
             sub = done[done["exit_reason"].str.startswith(reason)]
             if len(sub):
                 fig.add_trace(go.Scatter(x=sub["exit_date"], y=sub["exit_price"], mode="markers", name=nm,
-                                         marker=dict(symbol=sym, color=color, size=10),
-                                         customdata=sub["return_pct"],
-                                         hovertemplate="Sell %{y:.2f}<br>Trade result %{customdata:+.1f}%<extra></extra>"), 1, 1)
+                                         marker=dict(symbol=sym, color=color, size=10), customdata=sub["return_pct"],
+                                         hovertemplate=nm + " %{y:.2f}<br>Trade %{customdata:+.1f}%<extra></extra>"), 1, 1)
     for r, color, w in [(bh, GREY, 1.2), (res, BLUE, 1.8)]:
-        fig.add_trace(go.Scatter(x=r.equity.index, y=r.equity, name=r.name, line=dict(color=color, width=w),
-                                 legendgroup=r.name, showlegend=True), 2, 1)
+        fig.add_trace(go.Scatter(x=r.equity.index, y=r.equity, name=r.name, legendgroup=r.name,
+                                 line=dict(color=color, width=w)), 2, 1)
         dd = 100 * (r.equity / r.equity.cummax() - 1)
-        fig.add_trace(go.Scatter(x=dd.index, y=dd, name=r.name, line=dict(color=color, width=w),
-                                 legendgroup=r.name, showlegend=False), 3, 1)
-    fig.update_layout(height=800, template="plotly_white", hovermode="x unified", margin=dict(l=10, r=10, t=90, b=10),
+        fig.add_trace(go.Scatter(x=dd.index, y=dd, name=r.name, legendgroup=r.name, showlegend=False,
+                                 line=dict(color=color, width=w)), 3, 1)
+    fig.update_layout(height=760, hovermode="x unified", margin=dict(l=10, r=10, t=80, b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.07, x=0))
-    st.plotly_chart(fig)
+    return fig
 
-    st.markdown("**Trade log**")
-    if len(t):
-        shown = t.drop(columns="still_open").rename(columns={
-            "entry_date": "Bought", "exit_date": "Sold", "entry_price": "Buy price", "exit_price": "Sell price",
-            "days": "Days held", "return_pct": "Result %", "exit_reason": "Exit reason"})
-        st.dataframe(shown, hide_index=True)
-        st.download_button("Download trades (CSV)", shown.to_csv(index=False), f"{ticker}_{strategy}_trades.csv")
-    else:
-        st.write("No trades in this period.")
 
+# ================================================================ pages
+
+def home():
+    st.title("NSE Backtester")
+    lead("Test trading ideas on Indian stocks, with real costs, before you risk money.")
+    st.write("")
+    cards = [
+        (P_BACKTEST, "Backtest", "One company, one strategy. See every trade it would have made."),
+        (P_COMPETE, "Compete", "Strategies and companies compete. Find what actually works, and what was luck."),
+        (P_TODAY, "Today's signals", "What the strategies say for tomorrow. For paper trading."),
+    ]
+    for col, (page, title, text) in zip(st.columns(3, gap="medium"), cards):
+        with col.container(border=True):
+            st.markdown(f"**{title}**")
+            st.caption(text)
+            st.page_link(page, label="Open", icon=":material/arrow_forward:")
+    st.write("")
+    st.caption("New here? Start with **Learn** in the sidebar. Dates, costs and stop-loss live in the sidebar too.")
+
+
+def backtest():
+    st.title("Backtest")
+    lead("One company, one strategy, every trade.")
+    nifty = read_list("nifty50")
+    options = ["RELIANCE", "^NSEI", *[s for s in nifty if s != "RELIANCE"], "DEMO"]
+    c1, c2 = st.columns(2)
+    company = c1.selectbox("Company", options, accept_new_options=True, key="bt_company",
+                           help="Type any NSE symbol. ^NSEI is the Nifty 50 index; DEMO is fake prices that work offline.")
+    company = str(company).strip().upper()
+    choices = [p for p in PRESETS if p != "Buy & hold"]
+    preset = c2.selectbox("Strategy", choices, key="bt_preset")
+    family, base = PRESETS[preset]
+    st.caption(BLURB[family])
+    with st.expander("Fine-tune the strategy's settings"):
+        params = {k: st.slider(k.replace("_", " "), lo, hi, base.get(k, d), key=f"bt_{preset}_{k}")
+                  for k, (lo, hi, d) in SPEC[family].items()}
+
+    fp = fingerprint(company, preset, tuple(params.items()))
+    if st.button("Run backtest", type="primary", icon=":material/play_arrow:"):
+        try:
+            with st.spinner(f"Loading {company}..."):
+                df = prices(company, cfg["start_s"], cfg["end_s"])
+            if len(df) < 250:
+                raise ValueError(f"Only {len(df)} trading days of data for {company}. Widen the dates in the sidebar.")
+            res = run(df, STRATEGIES[family](df, **params), cfg["capital"], cfg["costs"], preset.split(" (")[0], **cfg["risk"])
+            bh = run(df, STRATEGIES["buyhold"](df), cfg["capital"], cfg["costs"], "Buy & hold")
+            st.session_state["bt"] = dict(df=df, res=res, bh=bh, company=company, preset=preset, fp=fp,
+                                          risk_text=cfg["risk_text"])
+        except ValueError as e:
+            st.error(str(e))
+            st.session_state.pop("bt", None)
+
+    r = st.session_state.get("bt")
+    if not r:
+        return
+    st.divider()
+    stale_note(r["fp"], fp)
+    df, res, bh = r["df"], r["res"], r["bh"]
+    s, b = res.stats, bh.stats
+    st.markdown(f"**{r['company']}** · {r['preset']} · {df.index[0].date()} to {df.index[-1].date()}"
+                + (f" · {r['risk_text']}" if r["risk_text"] else ""))
+    cols = st.columns(5)
+    cols[0].metric("Yearly return", f"{s['CAGR %']:.1f}%", f"{s['CAGR %'] - b['CAGR %']:+.1f} vs hold")
+    cols[1].metric("Worst fall", f"{s['Max drawdown %']:.1f}%", f"{s['Max drawdown %'] - b['Max drawdown %']:+.1f} vs hold")
+    cols[2].metric("Sharpe", f"{s['Sharpe']:.2f}", f"{s['Sharpe'] - b['Sharpe']:+.2f} vs hold")
+    cols[3].metric("Trades", f"{s['Trades']}", f"{s['Win rate %']:.0f}% won", delta_color="off", delta_arrow="off")
+    cols[4].metric("Final value", f"Rs {s['Final value']:,.0f}", f"{s['Final value'] - b['Final value']:+,.0f} vs hold")
+
+    d_ret, d_dd = s["CAGR %"] - b["CAGR %"], s["Max drawdown %"] - b["Max drawdown %"]
+    msg = (f"Compared with simply holding: {abs(d_ret):.1f} points a year **{'more' if d_ret > 0 else 'less'}** return, "
+           f"worst fall {abs(d_dd):.1f} points **{'smaller' if d_dd > 0 else 'bigger'}**. "
+           f"Invested {s['Time in market %']:.0f}% of the time.")
+    (st.success if d_ret > 0 else st.info)(msg)
+
+    st.plotly_chart(backtest_chart(df, res, bh))
+
+    with st.expander(f"Trade log ({len(res.trades)} trades)"):
+        t = res.trades
+        if len(t):
+            shown = t.drop(columns="still_open").rename(columns={
+                "entry_date": "Bought", "exit_date": "Sold", "entry_price": "Buy price", "exit_price": "Sell price",
+                "days": "Days held", "return_pct": "Result %", "exit_reason": "Exit"})
+            st.dataframe(shown, hide_index=True)
+            st.download_button("Download CSV", shown.to_csv(index=False), f"{r['company']}_trades.csv")
+        else:
+            st.write("No trades in this period.")
     with st.expander("What do these numbers mean?"):
         st.markdown(
-            "- **CAGR**: the steady yearly growth that turns your start amount into the end amount.\n"
-            "- **Worst fall (max drawdown)**: the biggest drop from a peak. Could you sit through it?\n"
+            "- **Yearly return (CAGR)**: the steady yearly growth that turns the start amount into the end amount.\n"
+            "- **Worst fall (max drawdown)**: the biggest drop from a peak. Could you sit through it with real money?\n"
             "- **Sharpe**: return per unit of bumpiness, above a 6.5% safe rate. Above 0.5 is okay, above 1 is good.\n"
-            "- **Win rate**: share of trades that made money. Misleading alone: small frequent wins can still lose to holding.\n"
-            "- **Costs**: STT, exchange and SEBI fees, stamp duty, GST and 0.05% slippage per side. Tax and the flat DP charge are not included."
+            "- **Won %**: share of trades that made money. Misleading alone: many small wins can still lose to holding.\n"
+            "- **Costs**: STT, exchange and SEBI fees, stamp duty, GST and 0.05% slippage per side. "
+            "Tax and the flat DP charge are not included."
         )
 
-# ---------------------------------------------------------------- tab: compare
 
-with tab_cmp:
-    st.markdown(f"**All strategies on {ticker}**, default settings" + (f", with {risk_text()}" if risk_text() else ""))
-    results = [simulate(df, k, label=k) for k in SCAN_STRATEGIES] + [bh]
-    st.dataframe(table(results), width="stretch")
-    fig2 = go.Figure()
-    for r, color in zip(results, [BLUE, RED, GREEN, GREY]):
-        fig2.add_trace(go.Scatter(x=r.equity.index, y=r.equity, name=r.name, line=dict(color=color, width=1.6)))
-    fig2.update_layout(height=420, template="plotly_white", hovermode="x unified", yaxis_title="Portfolio value (Rs)",
-                       margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", y=1.08, x=0))
-    st.plotly_chart(fig2)
+def compete():
+    st.title("Compete")
+    lead("Pick companies and strategies, or let them all compete. Buy & hold competes too: it's the bar to beat.")
+    nifty = read_list("nifty50")
 
-# ---------------------------------------------------------------- tab: scan
+    group = st.segmented_control("Companies", ["Nifty 50", "My watchlist", "Choose"], default="Nifty 50",
+                                 required=True, key="cmp_group")
+    if group == "Choose":
+        picked = st.multiselect("Choose companies", ["^NSEI", *nifty], default=["RELIANCE", "TCS", "HDFCBANK", "ITC"],
+                                accept_new_options=True, key="cmp_pick", placeholder="Type or pick NSE symbols")
+        companies = list(dict.fromkeys(str(p).strip().upper() for p in picked))
+    else:
+        companies = read_list("nifty50" if group == "Nifty 50" else "watchlist")
+        st.caption(f"{len(companies)} companies" + (" (edit watchlist.txt to change)" if group == "My watchlist" else ""))
+    strategies = st.pills(
+        "Strategies", list(PRESETS), selection_mode="multi", default=list(PRESETS), key="cmp_strats",
+        format_func=lambda s: s.split(" (")[0],
+        help="Click to include or leave out. "
+             + " · ".join(f"{s.split(' (')[0]}: {s.split(' (')[1].rstrip(')')}" for s in PRESETS if "(" in s))
+    strategies = [s for s in PRESETS if s in (strategies or [])]
 
-with tab_scan:
-    st.markdown("**Does an idea work broadly, or only on a lucky few?** Runs every strategy on every stock in a list.")
-    which = st.radio("Stocks", ["Nifty 50", "My watchlist"], horizontal=True)
-    names = read_list("nifty50" if which == "Nifty 50" else "watchlist")
-    st.caption(f"{len(names)} stocks, settings from the sidebar (dates, costs"
-               f"{', ' + risk_text() if risk_text() else ''}). First run downloads data and takes 2-3 minutes; "
-               "later runs the same day are instant.")
-    if st.button("Run scan", type="primary"):
-        rows, skipped = [], []
+    c3, c4 = st.columns(2)
+    rank_label = c3.selectbox("Rank by", list(RANK_BY), key="cmp_rank")
+    metric = RANK_BY[rank_label]
+    fair = c4.toggle("Fair test (recommended)", True, key="cmp_fair",
+                     help="Pick winners using older data, then check them on newer data they never saw. "
+                          "A winner that collapses on new data was luck.")
+    split = c4.date_input("Newer data starts", date(2022, 1, 1), key="cmp_split", disabled=not fair,
+                          min_value=date(2001, 1, 1), max_value=date.today())
+
+    fp = fingerprint(tuple(companies), tuple(strategies), metric, fair, split)
+    if st.button("Start competition", type="primary", icon=":material/emoji_events:"):
+        if not companies or not strategies:
+            st.warning("Pick at least one company and one strategy.")
+            return
+        split_ts = pd.Timestamp(split) if fair else None
+        if fair and not (cfg["start"] < split < cfg["end"]):
+            st.warning("'Newer data starts' must fall between the From and To dates in the sidebar.")
+            return
+        entries = {s: PRESETS[s] for s in strategies}
+        parts, data, skipped = [], {}, []
+        bar = st.progress(0.0, text="Starting...")
+        for i, tk in enumerate(companies, 1):
+            bar.progress(i / len(companies), text=f"{tk} ({i}/{len(companies)})")
+            try:
+                df = prices(tk, cfg["start_s"], cfg["end_s"])
+                if fair:
+                    old, new = df.loc[:split_ts - pd.Timedelta(days=1)], df.loc[split_ts:]
+                    if len(old) < 250 or len(new) < 120:
+                        raise ValueError("not enough data on one side of the split")
+                elif len(df) < 250:
+                    raise ValueError("less than a year of data")
+                parts.append(tournament({tk: df}, entries, cfg["capital"], cfg["costs"], split_ts, cfg["risk"]))
+                data[tk.upper()] = df
+            except Exception as e:  # one bad ticker shouldn't stop the competition
+                skipped.append(f"{tk} ({e})")
+        bar.empty()
+        if not parts:
+            st.error("No company could be tested. Check your internet connection or the dates.")
+            st.session_state.pop("cmp", None)
+            return
+        st.session_state["cmp"] = dict(res=pd.concat(parts, ignore_index=True), data=data, skipped=skipped,
+                                       metric=metric, rank_label=rank_label, split=split_ts, fp=fp,
+                                       risk_text=cfg["risk_text"])
+
+    r = st.session_state.get("cmp")
+    if r:
+        st.divider()
+        stale_note(r["fp"], fp)
+        show_competition(r)
+
+
+def pretty(col: str) -> str:
+    col = col.replace("Max drawdown %", "Worst fall %").replace("Edge", "Edge vs hold")
+    return col.replace(" [all]", "").replace(" [old]", " (old)").replace(" [new]", " (new)")
+
+
+def show_competition(r):
+    res, metric, split = r["res"], r["metric"], r["split"]
+    fair = split is not None
+    board = ranked(res, metric)
+    strat = strategy_table(res, metric)
+    n_pairs, n_cos, n_str = len(board), res["Company"].nunique(), res["Strategy"].nunique()
+    best_pair, best_strat = board.iloc[0], strat.index[0]
+    p = "old" if fair else "all"
+
+    st.markdown(f"**{n_cos} companies × {n_str} strategies = {n_pairs} pairs**, ranked by {r['rank_label']}"
+                + (f", winners picked on data before {split.date()}" if fair else "")
+                + (f" · {r['risk_text']}" if r["risk_text"] else ""))
+
+    c1, c2, c3 = st.columns(3)
+    with c1.container(border=True):
+        st.caption("Best strategy overall")
+        st.markdown(f"**{best_strat}**")
+        st.caption(f"median {pretty(metric)}: {strat.iloc[0, 0]:.2f}" + (" on old data" if fair else ""))
+    with c2.container(border=True):
+        st.caption("Best single pair")
+        st.markdown(f"**{best_pair['Strategy']}** on **{best_pair['Company']}**")
+        if fair:
+            st.caption(f"{pretty(metric)} {best_pair[f'{metric} [old]']:.2f} on old data, "
+                       f"{best_pair[f'{metric} [new]']:.2f} on new (rank #{best_pair['Rank on new data']} of {n_pairs})")
+        else:
+            st.caption(f"{pretty(metric)} {best_pair[f'{metric} [all]']:.2f}")
+    with c3.container(border=True):
+        st.caption("Buy & hold")
+        if "Buy & hold" in strat.index:
+            pos = list(strat.index).index("Buy & hold") + 1
+            st.markdown(f"**#{pos}** of {n_str} strategies")
+            st.caption("ranked by median score across companies")
+        else:
+            st.markdown("**Not competing**")
+            st.caption("add it to see if any rule beats holding")
+
+    # plain-language verdict
+    if "Buy & hold" in strat.index and best_strat == "Buy & hold":
+        st.info("Buy & hold won. On these companies, no timing rule beat simply holding.")
+    if fair and n_pairs >= 4:
+        new_rank = int(best_pair["Rank on new data"])
+        share = new_rank / n_pairs  # 0.1 = top 10% on data the ranking never saw
+        if share <= 0.10:
+            st.success(f"The top pair held up: #{new_rank} of {n_pairs} on data it never saw.")
+        elif share <= 0.33:
+            st.info(f"The top pair slipped to #{new_rank} of {n_pairs} on new data: some of its edge was luck.")
+        else:
+            st.warning(f"The top pair fell to #{new_rank} of {n_pairs} on new data, mid-table or worse. "
+                       "Its win on old data was mostly luck.")
+
+    tab_s, tab_p = st.tabs(["By strategy", "By pair"])
+    with tab_s:
+        shown = strat.rename(columns=lambda c: c.replace(metric, pretty(metric)).replace("Edge vs hold", "edge vs hold"))
+        st.dataframe(shown)
+        st.caption("Best on: for how many companies this strategy came first. "
+                   "Beat hold on: for how many it returned more than buying and holding."
+                   + (f" Old = before {split.date()}, used to rank. New = after it, unseen." if fair else ""))
+    with tab_p:
+        cols = ["Rank", "Company", "Strategy", f"{metric} [{p}]"]
+        if fair:
+            cols += [f"{metric} [new]", "Rank on new data"]
+        q = "new" if fair else "all"
+        cols += [f"CAGR % [{q}]", f"Max drawdown % [{q}]", f"Edge [{q}]"]
+        cols = list(dict.fromkeys(c for c in cols if c in board))  # metric may repeat a column
+        show_all = st.toggle(f"Show all {n_pairs} pairs", key="cmp_all") if n_pairs > 25 else True
+        view = board[cols] if show_all else board[cols].head(25)
+        st.dataframe(view.rename(columns=pretty).round(2), hide_index=True)
+        st.download_button("Download CSV", board.rename(columns=pretty).to_csv(index=False), "competition.csv")
+
+    with st.expander("Look at one pair"):
+        labels = [f"#{row.Rank}  {row.Strategy} on {row.Company}" for row in board.head(50).itertuples()]
+        choice = st.selectbox("Pair", labels, key="cmp_inspect")
+        row = board.iloc[labels.index(choice)]
+        df = r["data"][row["Company"]]
+        fam, params = PRESETS[row["Strategy"]]
+        kw = {} if fam == "buyhold" else cfg["risk"]
+        res1 = run(df, STRATEGIES[fam](df, **params), cfg["capital"], cfg["costs"], row["Strategy"], **kw)
+        bh = run(df, STRATEGIES["buyhold"](df), cfg["capital"], cfg["costs"], "Buy & hold")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=bh.equity.index, y=bh.equity, name="Buy & hold", line=dict(color=GREY, width=1.2)))
+        if fam != "buyhold":
+            fig.add_trace(go.Scatter(x=res1.equity.index, y=res1.equity, name=row["Strategy"],
+                                     line=dict(color=BLUE, width=1.8)))
+        if fair:
+            fig.add_vline(x=split, line=dict(color=AMBER, dash="dot", width=1))
+            fig.add_annotation(x=split, y=1, yref="paper", text="new data →", showarrow=False,
+                               xanchor="left", font=dict(color=AMBER, size=11))
+        fig.update_layout(height=380, hovermode="x unified", yaxis_title="Portfolio value (Rs)",
+                          margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=1.12, x=0))
+        st.plotly_chart(fig)
+
+    if r["skipped"]:
+        st.caption("Skipped: " + ", ".join(r["skipped"]))
+    st.caption("Survivorship bias: the Nifty 50 list is today's members, so past losers that left the index are missing.")
+
+
+def today():
+    st.title("Today's signals")
+    lead("What each strategy says for the next market open. For paper trading only.")
+    which = st.segmented_control("Companies", ["My watchlist", "Nifty 50"], default="My watchlist",
+                                 required=True, key="today_list")
+    names = read_list("watchlist" if which == "My watchlist" else "nifty50")
+    st.caption("Best checked after 3:45 pm, when the day's prices are final.")
+    if st.button("Get signals", type="primary", icon=":material/refresh:"):
+        rows, partial, skipped = [], False, []
         bar = st.progress(0.0, text="Starting...")
         for i, tk in enumerate(names, 1):
             bar.progress(i / len(names), text=f"{tk} ({i}/{len(names)})")
-            try:
-                d = prices(tk, start.isoformat(), end_arg)
-                if len(d) < 250:
-                    raise ValueError("less than a year of data")
-                rows.append(stock_row(tk, d, capital, costs, **risk))
-            except Exception as e:  # one bad ticker shouldn't stop the scan
-                skipped.append(f"{tk} ({e})")
-        bar.empty()
-        if rows:
-            st.session_state["scan"] = (pd.DataFrame(rows).set_index("Stock").round(1), skipped, risk_text(), which)
-        else:
-            st.error("No stocks could be scanned. Check your internet connection.")
-    if "scan" in st.session_state:
-        out, skipped, rtxt, w = st.session_state["scan"]
-        st.markdown(f"**Summary across {len(out)} stocks** ({w}{', ' + rtxt if rtxt else ''})")
-        st.dataframe(summary(out).astype(str), width="stretch")
-        st.caption("Read it like this: if 'Beat B&H' is a small fraction, the idea rarely beats holding. "
-                   "Survivorship bias flatters these results: the list is today's members.")
-        st.markdown("**Every stock**")
-        st.dataframe(out, width="stretch", height=420,
-                     column_config={"Beat B&H?": st.column_config.TextColumn(width="medium"),
-                                    "Years": st.column_config.NumberColumn(format="%.1f")})
-        st.download_button("Download scan (CSV)", out.to_csv(), "scan.csv")
-        if skipped:
-            st.caption("Skipped: " + ", ".join(skipped))
-
-# ---------------------------------------------------------------- tab: today
-
-with tab_today:
-    st.markdown("**Today's signals for paper trading.** The best time to look is after 3:45 pm, once the day's bar is final.")
-    which_t = st.radio("Stocks", ["My watchlist", "Nifty 50"], horizontal=True, key="today_list")
-    t_names = read_list("watchlist" if which_t == "My watchlist" else "nifty50")
-    if st.button("Get signals", type="primary"):
-        rows, partial, skipped = [], False, []
-        bar = st.progress(0.0, text="Starting...")
-        for i, tk in enumerate(t_names, 1):
-            bar.progress(i / len(t_names), text=f"{tk} ({i}/{len(t_names)})")
             try:
                 d, dropped = drop_incomplete_bar(fresh_prices(tk))
                 partial = partial or dropped
@@ -304,77 +448,100 @@ with tab_today:
                 skipped.append(f"{tk} ({e})")
         bar.empty()
         st.session_state["today"] = (pd.DataFrame(rows), partial, skipped)
-    if "today" in st.session_state:
-        sig, partial, skipped = st.session_state["today"]
-        if partial:
-            st.warning("The market is still open, so today's unfinished bar was ignored. "
-                       "These signals are as of the previous close. Check again after 3:45 pm.")
 
-        def colour(v):
-            return {"BUY tmrw": "background-color:#dcefd5;font-weight:600",
-                    "SELL tmrw": "background-color:#f6d9d6;font-weight:600",
-                    "hold": "color:#1f4e79"}.get(v, "color:#9a9a9a")
+    if "today" not in st.session_state:
+        return
+    sig, partial, skipped = st.session_state["today"]
+    st.divider()
+    if partial:
+        st.warning("The market is still open, so today's unfinished prices were ignored. "
+                   "These signals are as of the previous close.")
+    if sig.empty:
+        st.error("No signals. Check your internet connection.")
+        return
+    acts = sig[SCAN_STRATEGIES].isin(["BUY tmrw", "SELL tmrw"]).sum().sum()
+    st.markdown(f"**{acts} action{'s' if acts != 1 else ''}** for the next open across {len(sig)} companies.")
 
-        st.dataframe(sig.style.map(colour, subset=SCAN_STRATEGIES), hide_index=True,
-                     column_config={"Price": st.column_config.NumberColumn("Price (Rs)", format="%.2f"),
-                                    "Last close": st.column_config.TextColumn("Last close")})
-        st.caption("BUY tmrw / SELL tmrw: act at the next market open. hold: stay in. -: stay out. "
-                   "Write fake trades in the Paper log tab and follow ONE strategy for 6-8 weeks.")
-        if skipped:
-            st.caption("Skipped: " + ", ".join(skipped))
+    def colour(v):
+        return {"BUY tmrw": f"background-color: rgba(63,185,80,0.18); color: {GREEN}; font-weight: 600",
+                "SELL tmrw": f"background-color: rgba(248,81,73,0.18); color: {RED}; font-weight: 600",
+                "hold": f"color: {BLUE}"}.get(v, f"color: {GREY}")
 
-# ---------------------------------------------------------------- tab: paper log
+    st.dataframe(sig.style.map(colour, subset=SCAN_STRATEGIES), hide_index=True,
+                 column_config={"Price": st.column_config.NumberColumn("Price (Rs)", format="%.2f"),
+                                "Last close": st.column_config.TextColumn("Prices as of"),
+                                "sma": "SMA 50/200", "rsi": "RSI 14", "breakout": "Breakout 55/20"})
+    st.caption("BUY / SELL tmrw: act at the next open. hold: stay in. -: stay out. "
+               "Log fake trades in Paper log and follow one strategy for 6-8 weeks.")
+    if skipped:
+        st.caption("Skipped: " + ", ".join(skipped))
 
-with tab_log:
-    st.markdown("**Paper trade log.** Fake trades only. Add a row each time a signal says BUY or SELL.")
-    LOG = ROOT / "paper_trades.csv"
-    COLS = ["date", "stock", "strategy", "side", "price", "qty", "note"]
-    if LOG.exists():
-        log = pd.read_csv(LOG, dtype={"date": str, "note": str}).reindex(columns=COLS)
+
+def paper_log():
+    st.title("Paper log")
+    lead("Fake trades only. Add a row each time a signal says BUY or SELL, then press Save.")
+    path = ROOT / "paper_trades.csv"
+    cols = ["date", "stock", "strategy", "side", "price", "qty", "note"]
+    if path.exists():
+        log = pd.read_csv(path, dtype={"date": str, "note": str}).reindex(columns=cols)
     else:
-        log = pd.DataFrame({c: pd.Series(dtype="object") for c in COLS})
+        log = pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
     edited = st.data_editor(
         log, num_rows="dynamic", hide_index=True, key="log_editor",
         column_config={
             "date": st.column_config.TextColumn("Date", help="YYYY-MM-DD"),
             "stock": st.column_config.TextColumn("Stock"),
-            "strategy": st.column_config.SelectboxColumn("Strategy", options=SCAN_STRATEGIES),
+            "strategy": st.column_config.SelectboxColumn("Strategy", options=[p for p in PRESETS if p != "Buy & hold"]),
             "side": st.column_config.SelectboxColumn("Side", options=["BUY", "SELL"]),
             "price": st.column_config.NumberColumn("Price (Rs)", min_value=0.0, format="%.2f"),
             "qty": st.column_config.NumberColumn("Qty", min_value=0, step=1),
             "note": st.column_config.TextColumn("Note"),
         },
     )
-    if st.button("Save log"):
-        edited.to_csv(LOG, index=False)
+    if st.button("Save", type="primary", icon=":material/save:"):
+        edited.to_csv(path, index=False)
         st.success(f"Saved {len(edited)} rows to paper_trades.csv on this computer.")
 
-    if len(edited.dropna(subset=["stock", "side", "price", "qty"])):
-        e = edited.dropna(subset=["stock", "side", "price", "qty"]).copy()
+    e = edited.dropna(subset=["stock", "side", "price", "qty"]).copy()
+    if len(e):
         e["qty"], e["price"] = e["qty"].astype(float), e["price"].astype(float)
         e["bought"] = e["qty"].where(e["side"] == "BUY", 0.0)
         e["sold"] = e["qty"].where(e["side"] == "SELL", 0.0)
         e["net_cash"] = (e["sold"] - e["bought"]) * e["price"]
         pnl = e.groupby("stock")[["bought", "sold", "net_cash"]].sum()
         pnl["status"] = ["closed" if b == s else "open" for b, s in zip(pnl["bought"], pnl["sold"])]
-        st.markdown("**Per stock.** Net cash equals your profit only once the position is closed.")
+        st.divider()
+        st.markdown("**Per stock.** Net cash equals your profit once a position is closed.")
         st.dataframe(pnl.round(2))
 
-# ---------------------------------------------------------------- tab: learn
 
-with tab_learn:
+def learn():
+    st.title("Learn")
     guide = ROOT / "docs" / "LEARNING.md"
-    if guide.exists():
-        text = guide.read_text()
-        intro, *sections = text.split("\n## ")
-        st.markdown(intro.split("\n---")[0])
-        st.info("The commands in this guide are the terminal versions. You don't need the terminal: "
-                "`compare` is the Compare tab, `test` is the Backtest tab, `scan` is the Scan tab, "
-                "`today` is the Today tab, and the stop and size options are in the sidebar.")
-        for sec in sections:
-            title, _, body = sec.partition("\n")
-            body = body.strip().removesuffix("---").strip()
-            with st.expander(title.strip()):
-                st.markdown(body)
-    else:
+    if not guide.exists():
         st.write("docs/LEARNING.md not found.")
+        return
+    intro, *sections = guide.read_text().split("\n## ")
+    body = intro.split("\n---")[0].split("\n", 1)[-1].strip()  # drop the file's own title
+    st.markdown(body)
+    st.info("The guide shows terminal commands, but you don't need the terminal: `test` is the Backtest page, "
+            "`compare`, `scan` and `optimize` are covered by Compete (turn on Fair test), and `today` is "
+            "Today's signals. Stop-loss and position size are in the sidebar.")
+    for sec in sections:
+        title, _, text = sec.partition("\n")
+        with st.expander(title.strip()):
+            st.markdown(text.strip().removesuffix("---").strip())
+
+
+# ================================================================ navigation
+
+P_HOME = st.Page(home, title="Home", icon=":material/home:", default=True)
+P_BACKTEST = st.Page(backtest, title="Backtest", icon=":material/show_chart:")
+P_COMPETE = st.Page(compete, title="Compete", icon=":material/emoji_events:")
+P_TODAY = st.Page(today, title="Today's signals", icon=":material/notifications:")
+P_LOG = st.Page(paper_log, title="Paper log", icon=":material/edit_note:")
+P_LEARN = st.Page(learn, title="Learn", icon=":material/school:")
+
+page = st.navigation([P_HOME, P_BACKTEST, P_COMPETE, P_TODAY, P_LOG, P_LEARN])
+cfg = sidebar_settings()
+page.run()

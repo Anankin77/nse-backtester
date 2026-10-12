@@ -29,18 +29,18 @@ python run.py compare DEMO
 ```bash
 ./start.sh
 ```
-Opens in your browser at http://localhost:8501. It runs on your own computer with the same engine as the commands below, so results are identical.
+Opens in your browser at http://localhost:8501, in a dark theme. It runs on your own computer with the same engine as the commands below, so results are identical. Pages stay empty until you press their button.
 
-| Tab | What it does |
+| Page (left sidebar) | What it does |
 |---|---|
-| **Backtest** | Pick a stock, a strategy and sliders for its settings; get yearly return, worst fall, an interactive chart with every buy and sell, and the trade log |
-| **Compare** | All strategies on that stock side by side |
-| **Scan** | Every strategy on all 50 Nifty stocks (or your watchlist), with a summary of how often each beats holding |
-| **Today** | Current buy/sell signals for paper trading. Ignores the unfinished bar while the market is open |
+| **Home** | A plain start page with links to the three main tools |
+| **Backtest** | One company, one strategy (with sliders to fine-tune it): yearly return, worst fall, an interactive chart with every buy and sell, and the trade log |
+| **Compete** | Pick any companies (Nifty 50, your watchlist, or your own choice) and any of 7 strategies, including buy & hold as the benchmark. Every pair is ranked by Sharpe, return, Calmar, smallest fall, or edge over holding. **Fair test** picks winners on older data and checks them on newer data, so you can see which winners were luck |
+| **Today's signals** | Current buy/sell signals for paper trading. Ignores the unfinished bar while the market is open |
 | **Paper log** | A table for your fake trades, saved to `paper_trades.csv` |
 | **Learn** | The learning path, one phase per expandable section |
 
-Settings (dates, costs, stop-loss, position size) are in the left sidebar and apply to every tab. For a quick look without internet, choose the stock `DEMO`.
+Shared settings (dates, capital, costs, stop-loss, position size) sit in the sidebar under the menu and apply to every page. For a quick look without internet, choose the company `DEMO` on the Backtest page.
 
 ## Command line
 
