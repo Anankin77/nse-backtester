@@ -1,16 +1,24 @@
-"""Price data: download NSE stocks from Yahoo Finance, cache them, or load a CSV.
+"""Price data: saved prices, Yahoo Finance downloads, CSV files, or fake prices.
 
 All loaders return a DataFrame indexed by date with columns:
 Open, High, Low, Close, Volume  (Close is split/dividend adjusted).
+
+Where prices come from, in order:
+1. prices/<TICKER>.csv, saved in the repo by a daily GitHub job (see backtester/update.py).
+   The hosted app never has to reach Yahoo itself, and every page sees the same prices.
+2. Yahoo Finance, for any ticker that isn't saved, cached in data/ for the day.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-CACHE_DIR = Path(__file__).resolve().parent.parent / "data"
+ROOT = Path(__file__).resolve().parent.parent
+CACHE_DIR = ROOT / "data"
+PRICES_DIR = ROOT / "prices"
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
 
@@ -22,8 +30,36 @@ def nse_symbol(ticker: str) -> str:
     return f"{t}.NS"
 
 
-def download(ticker: str, start: str, end: str | None = None, use_cache: bool = True) -> pd.DataFrame:
-    """Daily OHLCV for an NSE ticker, cached as CSV in ./data/."""
+def stored_file(ticker: str) -> Path:
+    """'RELIANCE' -> prices/RELIANCE.csv, '^NSEI' -> prices/IDX_NSEI.csv."""
+    t = ticker.strip().upper().removesuffix(".NS")
+    return PRICES_DIR / (t.replace("^", "IDX_").replace("&", "_AND_") + ".csv")
+
+
+def load_stored(ticker: str) -> pd.DataFrame | None:
+    f = stored_file(ticker)
+    return load_csv(f) if f.exists() else None
+
+
+def stored_status() -> dict:
+    """What the last daily update wrote: last trading day, when, and which tickers failed."""
+    f = PRICES_DIR / "_status.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def download(ticker: str, start: str, end: str | None = None, use_cache: bool = True,
+             use_store: bool = True) -> pd.DataFrame:
+    """Daily OHLCV for an NSE ticker from `start` up to (not including) `end`.
+
+    Uses the saved copy in prices/ when there is one, otherwise Yahoo (cached in data/)."""
+    if use_store:
+        saved = load_stored(ticker)
+        if saved is not None:
+            last = pd.Timestamp(end) - pd.Timedelta(days=1) if end else None
+            return saved.loc[start:last]
     symbol = nse_symbol(ticker)
     CACHE_DIR.mkdir(exist_ok=True)
     # Open-ended requests are cached per calendar day, so rerunning a 50-stock scan is instant.

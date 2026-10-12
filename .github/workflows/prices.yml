@@ -1,0 +1,48 @@
+# Saves the day's prices into prices/ every weekday evening, so the web app (on your
+# laptop or hosted) reads them from the repo and never needs Yahoo itself.
+# Run it by hand any time: GitHub > Actions > Update prices > Run workflow.
+name: Update prices
+
+on:
+  schedule:
+    - cron: "7 11,13 * * 1-5"   # 16:37 and 18:37 IST, Mon-Fri (the second run is a backup)
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/prices.yml", "backtester/update.py", "watchlist.txt", "nifty50.txt"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -q "pandas>=2.0" "numpy>=1.24" "yfinance>=0.2.40"
+
+      - name: Download prices from Yahoo
+        run: python -m backtester.update
+
+      - name: Save to the repo
+        if: always()
+        run: |
+          git add prices
+          if git diff --cached --quiet; then echo "No new prices."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          last=$(python -c "import json; print(json.load(open('prices/_status.json'))['last_bar'])")
+          git commit -q -m "Prices up to $last"
+          git pull -q --rebase origin main
+          git push -q origin HEAD:main

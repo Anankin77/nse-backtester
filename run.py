@@ -8,6 +8,7 @@ Examples
   python run.py test mydata.csv --strategy rsi
   python run.py scan                    # every strategy on every stock in watchlist.txt
   python run.py today                   # today's signals, for paper trading
+  python run.py update                  # refresh the saved prices in prices/
 """
 from __future__ import annotations
 
@@ -200,6 +201,14 @@ def cmd_today(args):
     print(pd.DataFrame(rows).to_string(index=False))
 
 
+def cmd_update(args):
+    """Refresh prices/ from Yahoo. GitHub runs this every weekday evening."""
+    from backtester import update
+    code = update.main(args.tickers)
+    if code:
+        raise SystemExit(code)
+
+
 def show(df, results, args, title):
     OUT.mkdir(exist_ok=True)
     print(f"\n{title}")
@@ -263,6 +272,10 @@ def main():
     td.add_argument("tickers", nargs="*", help="empty = the --list file")
     td.add_argument("--list", default="watchlist")
     td.set_defaults(func=cmd_today)
+
+    up = sub.add_parser("update", help="refresh the saved prices in prices/ (GitHub does this daily)")
+    up.add_argument("tickers", nargs="*", help="empty = everything in watchlist.txt and nifty50.txt")
+    up.set_defaults(func=cmd_update)
 
     args = p.parse_args()
     try:
