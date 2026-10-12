@@ -24,7 +24,25 @@ Check that it works (offline, uses fake prices):
 python run.py compare DEMO
 ```
 
-## Usage
+## Web app (easiest)
+
+```bash
+./start.sh
+```
+Opens in your browser at http://localhost:8501. It runs on your own computer with the same engine as the commands below, so results are identical.
+
+| Tab | What it does |
+|---|---|
+| **Backtest** | Pick a stock, a strategy and sliders for its settings; get yearly return, worst fall, an interactive chart with every buy and sell, and the trade log |
+| **Compare** | All strategies on that stock side by side |
+| **Scan** | Every strategy on all 50 Nifty stocks (or your watchlist), with a summary of how often each beats holding |
+| **Today** | Current buy/sell signals for paper trading. Ignores the unfinished bar while the market is open |
+| **Paper log** | A table for your fake trades, saved to `paper_trades.csv` |
+| **Learn** | The learning path, one phase per expandable section |
+
+Settings (dates, costs, stop-loss, position size) are in the left sidebar and apply to every tab. For a quick look without internet, choose the stock `DEMO`.
+
+## Command line
 
 | Command | What it does |
 |---|---|
@@ -104,8 +122,11 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 ## Project layout
 
 ```
+app.py                   web app (streamlit)
+start.sh                 one-command launcher
 run.py                   command-line interface
 backtester/
+  analysis.py            scan rows, summaries, today's signals (shared by app and CLI)
   data.py                download / cache / CSV / synthetic prices
   strategies.py          indicators + strategy rules
   engine.py              the simulation (timing, costs, trade log)

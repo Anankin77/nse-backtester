@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from backtester import DELIVERY, ZERO, STRATEGIES, download, load_csv, run, synthetic, table
+from backtester.analysis import drop_incomplete_bar, signal_row, stock_row, summary
 from backtester.plotting import report
 
 OUT = Path(__file__).resolve().parent / "results"
@@ -148,7 +149,6 @@ def watchlist(tickers: list[str], list_name: str = "watchlist") -> list[str]:
 def cmd_scan(args):
     """Every strategy on every stock: which ideas work where?"""
     tickers = watchlist(args.tickers, args.list)
-    strategies = [s for s in STRATEGIES if s != "buyhold"]
     rows, skipped = [], []
     print(f"Scanning {len(tickers)} stocks" + (f" with {risk_label(args)}" if risk_label(args) else "") + " ...")
     for n, tk in enumerate(tickers, 1):
@@ -156,15 +156,7 @@ def cmd_scan(args):
             df = load(tk, args.start, args.end)
             if len(df) < 250:
                 raise ValueError("less than a year of data")
-            row = {"Stock": tk.upper(), "Years": round(len(df) / 252, 1)}
-            bh = backtest(df, "buyhold", {}, args, label="Buy & hold").stats
-            row["B&H CAGR"], row["B&H MaxDD"] = bh["CAGR %"], bh["Max drawdown %"]
-            for s in strategies:
-                st = backtest(df, s, {}, args).stats
-                row[f"{s} CAGR"], row[f"{s} MaxDD"] = st["CAGR %"], st["Max drawdown %"]
-            best = max(strategies, key=lambda s: row[f"{s} CAGR"])
-            row["Beat B&H?"] = f"yes ({best})" if row[f"{best} CAGR"] > row["B&H CAGR"] else "no"
-            rows.append(row)
+            rows.append(stock_row(tk, df, args.capital, ZERO if args.no_costs else DELIVERY, **risk_kwargs(args)))
             print(f"  [{n}/{len(tickers)}] {tk.upper()}")
         except Exception as e:  # one bad ticker shouldn't kill a 50-stock scan
             skipped.append(tk)
@@ -175,21 +167,8 @@ def cmd_scan(args):
     out = pd.DataFrame(rows).set_index("Stock").round(1)
     print(f"\nCAGR % and max drawdown % per strategy, {args.start} -> {args.end or 'today'}\n")
     print(out.to_string())
-
-    # The summary is the point: does any idea work broadly, or only on a lucky few?
-    summary = {}
-    for s in strategies:
-        summary[s] = {
-            "Beat B&H on CAGR": f"{(out[f'{s} CAGR'] > out['B&H CAGR']).sum()} / {len(out)}",
-            "Smaller drawdown than B&H": f"{(out[f'{s} MaxDD'] > out['B&H MaxDD']).sum()} / {len(out)}",
-            "Median CAGR %": round(out[f"{s} CAGR"].median(), 1),
-            "Median MaxDD %": round(out[f"{s} MaxDD"].median(), 1),
-        }
-    summary["Buy & hold"] = {"Beat B&H on CAGR": "-", "Smaller drawdown than B&H": "-",
-                             "Median CAGR %": round(out["B&H CAGR"].median(), 1),
-                             "Median MaxDD %": round(out["B&H MaxDD"].median(), 1)}
     print("\nSummary across all stocks\n")
-    print(pd.DataFrame(summary).to_string())
+    print(summary(out).to_string())
     if skipped:
         print(f"\nSkipped: {', '.join(skipped)}")
 
@@ -202,21 +181,21 @@ def cmd_scan(args):
 def cmd_today(args):
     """Current signal for each stock, for paper trading. Run after market close (3:30 pm)."""
     start = (pd.Timestamp.today() - pd.Timedelta(days=500)).strftime("%Y-%m-%d")  # enough for SMA 200
-    rows = []
+    rows, partial = [], False
     for tk in watchlist(args.tickers, args.list):
         try:
             df = download(tk, start, None, use_cache=False)
         except ValueError as e:
             print(f"  skip {tk}: {e}")
             continue
-        row = {"Stock": tk.upper(), "Date": df.index[-1].date(), "Close": round(float(df["Close"].iloc[-1]), 2)}
-        for s in ("sma", "rsi", "breakout"):
-            sig = STRATEGIES[s](df)
-            now, before = sig.iloc[-1], sig.iloc[-2]
-            row[s] = ("BUY" if now else "SELL") + " tmrw" if now != before else ("hold" if now else "-")
-        rows.append(row)
+        df, dropped = drop_incomplete_bar(df)
+        partial = partial or dropped
+        rows.append(signal_row(tk, df))
 
-    print("\nSignals at the last close. 'BUY tmrw' / 'SELL tmrw' = act at tomorrow's open;")
+    if partial:
+        print("\nNote: the market is still open, so today's unfinished bar was ignored.")
+        print("Signals below are as of the previous close. Run again after 3:45 pm for today's.")
+    print("\nSignals at the last close. 'BUY tmrw' / 'SELL tmrw' = act at the next open;")
     print("'hold' = stay in; '-' = stay out. Paper trade these; don't treat them as advice.\n")
     print(pd.DataFrame(rows).to_string(index=False))
 
