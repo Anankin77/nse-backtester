@@ -292,7 +292,7 @@ def backtest():
             "- **Sharpe**: return per unit of bumpiness, above a 6.5% safe rate. Above 0.5 is okay, above 1 is good.\n"
             "- **Won %**: share of trades that made money. Misleading alone: many small wins can still lose to holding.\n"
             "- **Costs**: STT, exchange and SEBI fees, stamp duty, GST and 0.05% slippage per side. "
-            "Tax and the flat DP charge are not included."
+            "The flat DP charge (Rs 15.34 per sale) is included. Tax is not."
         )
 
 

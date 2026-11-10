@@ -9,6 +9,7 @@ Examples
   python run.py scan                    # every strategy on every stock in watchlist.txt
   python run.py today                   # today's signals, for paper trading
   python run.py update                  # refresh the saved prices in prices/
+  python run.py walkforward             # momentum portfolio vs holding the Nifty, out-of-sample
 """
 from __future__ import annotations
 
@@ -209,6 +210,56 @@ def cmd_update(args):
         raise SystemExit(code)
 
 
+def cmd_walkforward(args):
+    """Monthly momentum portfolio, walk-forward, against buying and holding the index."""
+    from backtester import walkforward as wf
+
+    index_df = download(args.index, "2000-01-01", args.end)
+    data, skipped = {}, []
+    for tk in watchlist(args.tickers, args.list):
+        try:
+            data[tk.upper()] = download(tk, "2000-01-01", args.end)
+        except ValueError:
+            skipped.append(tk)
+    if len(data) < 10:
+        raise ValueError("need at least 10 stocks with prices")
+    costs = ZERO if args.no_costs else DELIVERY
+
+    print(f"Monthly momentum on {len(data)} stocks ({args.list}.txt) vs buy & hold {args.index}")
+    print(f"Rule: rank by past 6/12-month return (skip latest month), hold top N equal weight, whole shares,")
+    print(f"      all cash when {args.index} is below its 200-day average. Rebalanced at each month's first open.")
+    print(f"Walk-forward: train {args.train_years} years (pick lookback and N by CAGR), test the next year, "
+          f"from {args.first_year}.")
+    print(f"Limits: {args.max_weight:g}% per stock, {args.max_exposure:g}% total. "
+          f"Costs: {'none' if args.no_costs else 'Zerodha delivery + Rs 15.34 DP charge per sell'}.")
+    if skipped:
+        print(f"Skipped (no prices): {', '.join(skipped)}")
+
+    results = []
+    for capital in args.capital:
+        r = wf.walk_forward(data, index_df, capital, args.first_year, args.train_years, costs,
+                            args.max_weight / 100, args.max_exposure / 100)
+        results.append(r)
+        print("\n" + "=" * 100)
+        print(wf.report(r))
+
+    print("\n" + "=" * 100)
+    print("VERDICT")
+    for r in results:
+        print(f"  Rs {r.capital:>9,.0f}: {wf.verdict(r)}  "
+              f"(CAGR {r.combined['strategy']['CAGR %']:.1f}% vs {r.combined['index']['CAGR %']:.1f}%)")
+    proven = [r for r in results if wf.verdict(r).startswith("BEATS")]
+    print("  Overall: " + ("beats the index out-of-sample at Rs " + ", ".join(f"{r.capital:,.0f}" for r in proven)
+                           if proven else "NO honest evidence that this strategy beats holding the index."))
+    print()
+    print(wf.NOTES)
+
+    OUT.mkdir(exist_ok=True)
+    for r in results:
+        r.windows.round(2).to_csv(OUT / f"walkforward_{int(r.capital)}.csv", index=False)
+    print(f"\nWindow tables saved to {OUT}")
+
+
 def show(df, results, args, title):
     OUT.mkdir(exist_ok=True)
     print(f"\n{title}")
@@ -276,6 +327,19 @@ def main():
     up = sub.add_parser("update", help="refresh the saved prices in prices/ (GitHub does this daily)")
     up.add_argument("tickers", nargs="*", help="empty = everything in watchlist.txt and nifty50.txt")
     up.set_defaults(func=cmd_update)
+
+    w = sub.add_parser("walkforward", help="momentum portfolio vs holding the index, out-of-sample")
+    w.add_argument("tickers", nargs="*", help="empty = the --list file")
+    w.add_argument("--list", default="nifty50")
+    w.add_argument("--index", default="^NSEI")
+    w.add_argument("--capital", type=float, nargs="+", default=[4_000, 100_000])
+    w.add_argument("--first-year", type=int, default=2012, help="first training year")
+    w.add_argument("--train-years", type=int, default=5)
+    w.add_argument("--max-weight", type=float, default=40, help="most of your money in one stock, %%")
+    w.add_argument("--max-exposure", type=float, default=100, help="most of your money in stocks, %%")
+    w.add_argument("--end", default=None)
+    w.add_argument("--no-costs", action="store_true")
+    w.set_defaults(func=cmd_walkforward)
 
     args = p.parse_args()
     try:

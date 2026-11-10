@@ -104,6 +104,7 @@ The token can only touch that one repo, and only lives in the app's secret setti
 | `python run.py test TCS --strategy sma --stop 8 --risk 1` | Risk 1% of equity per trade with an 8% stop |
 | `python run.py today` | Today's buy/sell signals for your watchlist, for paper trading |
 | `python run.py update` | Refresh `prices/` from Yahoo. GitHub does this daily; you shouldn't need it |
+| `python run.py walkforward` | Momentum portfolio vs holding the Nifty, out-of-sample, at ₹4,000 and ₹1,00,000 (see below) |
 
 **New to this? Start with the [learning path](docs/LEARNING.md).**
 
@@ -126,6 +127,45 @@ All values are percentages. They apply to the strategies; buy & hold always stay
 If you combine sizing options, the smallest position wins. After a stop-out, the strategy waits for its signal to turn off and back on before re-entering, so it won't instantly re-buy the same falling stock.
 
 New columns: **Avg exposure %** (how much of your money was actually in the market on average), and **Stops hit**. The trade log shows each exit's reason: `signal`, `stop`, `stop (gap)` or `still open`.
+
+## Portfolio mode and the walk-forward test
+
+```bash
+python run.py walkforward
+```
+
+One command answers: **does a strategy beat simply holding the Nifty 50, on data it never saw, with small money?**
+
+| Part | How it works |
+|---|---|
+| Portfolio (`backtester/portfolio.py`) | One cash pool across many stocks. Whole shares only. Per-stock limit (`--max-weight`, default 40%) and total limit (`--max-exposure`, default 100%). Sells first, then buys, strongest stock first |
+| Strategy (`backtester/momentum.py`) | Each month-end, rank `nifty50.txt` by past 6- and/or 12-month return, skipping the latest month. Hold the top N in equal amounts. All cash while `^NSEI` is below its 200-day average |
+| Walk-forward (`backtester/walkforward.py`) | Train on 5 years (pick lookback 6m / 12m / both and N = 3 / 5 / 10 by CAGR), test on the next year, roll forward. Train from 2012, so test years are 2017 onward. Each test year starts fresh with the stated capital |
+| Costs | Zerodha delivery charges, slippage, and ₹15.34 DP charge per stock per day it is sold |
+
+Options: `--capital 4000 100000`, `--first-year 2012`, `--train-years 5`, `--list nifty50`, `--no-costs`.
+
+### Result (prices to 2026-11-09, test years 2017 to 2026)
+
+| | CAGR | Worst fall | Sharpe |
+|---|---|---|---|
+| Momentum, ₹4,000 | 11.9% | -37% | 0.36 |
+| Momentum, ₹1,00,000 | 16.7% | -28% | 0.58 |
+| Buy & hold `^NSEI` | 12.3% | -38% | 0.39 |
+| Same 50 stocks, just held (control) | 22.6% | -38% | 0.92 |
+
+**Verdict: no honest evidence that it beats the index.**
+
+- **₹4,000: does not beat the index.** Trading costs eat about 5% of capital a year (the flat DP charge is 0.4% of the account per sale), and whole shares leave much of the money idle.
+- **₹1,00,000: not proven.** It is 4.4 points a year ahead of `^NSEI` on paper, but it won only 5 of 10 test years, and simply holding the same 50 stocks did 5.9 points better than the strategy. The list is today's index, chosen with hindsight, and that hindsight alone is worth about 10 points a year here. The strategy adds nothing on top of it.
+
+What the result still leaves out, all in the strategy's favour or the index's disfavour as noted:
+
+- **Survivorship bias** (above): the biggest problem. A fair test needs the index's members as they were each year.
+- `^NSEI` excludes dividends (about 1.2% a year); stock prices include them. The report shows the edge after this.
+- Whole shares are sized on adjusted prices, which are lower than what a share really cost before a split or bonus.
+- No capital-gains tax. Monthly selling pays 20% short-term tax every year; holding the index defers it.
+- The index is treated as buyable in any amount with no fund fee.
 
 ## Strategies
 
@@ -153,14 +193,14 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 ## How it stays honest
 
 1. **No look-ahead bias.** A signal decided at today's close is filled at tomorrow's open. The strategy never sees the future.
-2. **Real costs.** Zerodha delivery rates (checked Oct 2026): STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`). The flat DP charge (₹15.34 per sell) and capital-gains tax are not included, so small orders and frequent traders look better than reality.
+2. **Real costs.** Zerodha delivery rates (checked Oct 2026): STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`), and the flat DP charge (₹15.34 per stock per day it is sold). Capital-gains tax is not included, so frequent traders look better than reality.
 3. **Overfitting check.** `optimize` tunes on old data and reports performance on newer, unseen data. If the test result collapses, the "best" settings were luck.
 4. **Conservative stops.** Gaps fill at the open, not the stop price. Trailing stops trail closes, not intraday highs, because daily data can't tell whether the high came before the low.
-5. **Tested.** 37 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, trade-by-trade returns reconciling with the equity curve, the competition, the price job (a bad download never replaces saved prices) and the paper log's private repo (saving from two devices is caught, not overwritten).
+5. **Tested.** 57 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, trade-by-trade returns reconciling with the equity curve, the competition, whole-share portfolio fills, DP charges, rebalancing, momentum ranking, the walk-forward windows, the price job (a bad download never replaces saved prices) and the paper log's private repo (saving from two devices is caught, not overwritten).
 
 ## Limits (read before trading real money)
 
-- Long-only, one stock at a time. `scan` tests stocks separately; it doesn't run a combined portfolio.
+- Long-only. `test`, `compare` and `scan` trade one stock at a time; only `walkforward` runs a combined portfolio.
 - **Survivorship bias:** `nifty50.txt` holds today's members, so stocks that crashed out of the index are missing and results look better than reality.
 - Daily data only, so no intraday strategies. Saved prices refresh once a day, after the close.
 - Cash earns 0% while out of the market (in reality you'd park it in a liquid fund).
@@ -181,6 +221,9 @@ backtester/
   update.py              the daily price download
   github_file.py         paper log in a private GitHub repo
   strategies.py          indicators + strategy rules
+  portfolio.py           portfolio simulation (shared cash, whole shares, limits)
+  momentum.py            monthly momentum ranking + market filter
+  walkforward.py         rolling train/test windows, report, verdict
   engine.py              the simulation (timing, costs, trade log)
   costs.py               Indian delivery charges
   metrics.py             CAGR, Sharpe, drawdown, ...
@@ -193,6 +236,4 @@ docs/LEARNING.md         learning path
 
 ## Possible next steps
 
-- Portfolio mode: one pool of cash shared across many stocks
-- Walk-forward optimisation (repeat the train/test split over rolling windows)
 - Survivorship-bias-free data (include stocks that left the Nifty)

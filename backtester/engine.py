@@ -64,8 +64,8 @@ def run(df: pd.DataFrame, signal: pd.Series, capital: float = 100_000,
 
     def sell(i, px, reason):
         nonlocal cash, shares, entry_i, entry_px, peak
-        cash += shares * px * (1 - costs.sell)
-        trades.append(_trade(df.index, entry_i, i, entry_px, px, costs, reason))
+        cash += costs.sell_proceeds(shares * px)
+        trades.append(_trade(df.index, entry_i, i, entry_px, px, costs, reason, shares))
         shares, entry_i, entry_px, peak = 0.0, None, None, None
 
     for i in range(n):
@@ -117,8 +117,10 @@ def run(df: pd.DataFrame, signal: pd.Series, capital: float = 100_000,
     return res
 
 
-def _trade(index, i_in, i_out, px_in, px_out, costs, reason):
-    net = px_out * (1 - costs.sell) / (px_in * (1 + costs.buy)) - 1
+def _trade(index, i_in, i_out, px_in, px_out, costs, reason, shares=None):
+    # shares is given for real sales, which also pay the flat DP charge
+    dp = costs.dp_charge / shares if shares else 0.0
+    net = (px_out * (1 - costs.sell) - dp) / (px_in * (1 + costs.buy)) - 1
     d_in, d_out = index[i_in].date(), index[i_out].date()
     return {
         "entry_date": d_in,
