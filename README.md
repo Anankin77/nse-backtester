@@ -37,7 +37,8 @@ Opens in your browser at http://localhost:8501, in a dark theme. It runs on your
 | **Backtest** | One company, one strategy (with sliders to fine-tune it): yearly return, worst fall, an interactive chart with every buy and sell, and the trade log |
 | **Compete** | Pick any companies (Nifty 50, your watchlist, or your own choice) and any of 7 strategies, including buy & hold as the benchmark. Every pair is ranked by Sharpe, return, Calmar, smallest fall, or edge over holding. **Fair test** picks winners on older data and checks them on newer data, so you can see which winners were luck |
 | **Today's signals** | Current buy/sell signals for paper trading. Ignores the unfinished bar while the market is open |
-| **Paper log** | A table for your fake trades, saved to `paper_trades.csv` |
+| **Paper bot** | A fake account that trades itself every evening: tomorrow's orders, open positions, P&L against holding the index, reconciliation warnings, and a "ready for real money?" checklist |
+| **Manual log** | A table for fake trades you type in yourself, saved to `paper_trades.csv`. The bot makes this optional |
 | **Learn** | The learning path, one phase per expandable section |
 
 Shared settings (dates, capital, costs, stop-loss, position size) sit in the sidebar under the menu and apply to every page. The sidebar also shows the date of the latest prices. For a quick look without internet, choose the company `DEMO` on the Backtest page.
@@ -79,7 +80,16 @@ The token can only touch that one repo, and only lives in the app's secret setti
 5. Right away: the app's **Settings** > **Sharing** > **Only specific people can view this app**, and add your Gmail. Without this the app is public. (The free plan allows one private app.)
 6. On your phone, open the app's link, sign in with Google, then **Add to Home Screen**.
 
-**C. Laptop (optional).** To use the same paper log there, create `.streamlit/secrets.toml` with the same three lines. It's in `.gitignore`, so it never gets pushed. If you already have trades in `paper_trades.csv`, upload that file to `nse-paper-log` (Add file > Upload files).
+**C. The paper bot's key**
+
+The daily price job also runs the paper bot, which writes to the same private repo. Give the job the token:
+
+1. GitHub > `nse-backtester` > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**.
+2. Name `PAPER_LOG_TOKEN`, value: the same `github_pat_...` token as above. Save.
+
+Without this secret the bot step is skipped with a warning and everything else works as before.
+
+**D. Laptop (optional).** To use the same paper log there, create `.streamlit/secrets.toml` with the same three lines. It's in `.gitignore`, so it never gets pushed. If you already have trades in `paper_trades.csv`, upload that file to `nse-paper-log` (Add file > Upload files).
 
 ### Day to day
 
@@ -104,6 +114,7 @@ The token can only touch that one repo, and only lives in the app's secret setti
 | `python run.py test TCS --strategy sma --stop 8 --risk 1` | Risk 1% of equity per trade with an 8% stop |
 | `python run.py today` | Today's buy/sell signals for your watchlist, for paper trading |
 | `python run.py update` | Refresh `prices/` from Yahoo. GitHub does this daily; you shouldn't need it |
+| `python run.py paper --dir paper_log` | Run the paper bot once on your laptop, writing to a local folder (the daily job writes to the private repo) |
 | `python run.py walkforward` | Momentum portfolio vs holding the Nifty, out-of-sample, at ₹4,000 and ₹1,00,000 (see below) |
 
 **New to this? Start with the [learning path](docs/LEARNING.md).**
@@ -167,6 +178,62 @@ What the result still leaves out, all in the strategy's favour or the index's di
 - No capital-gains tax. Monthly selling pays 20% short-term tax every year; holding the index defers it.
 - The index is treated as buyable in any amount with no fund fee.
 
+## Paper bot
+
+A fake account that trades itself, so paper trading costs you no effort and can't be fudged.
+
+**How it runs**
+
+1. You set the rules once in `paper.toml`: stocks, strategy, capital, risk limits.
+2. Every weekday evening the price job saves the day's prices, then runs the bot (`backtester/paper.py`).
+3. The bot fills yesterday's decisions at today's open, with full costs, and works out tomorrow's orders.
+4. Results go to the `bot/` folder of your private `nse-paper-log` repo and show on the **Paper bot** page.
+
+**Rules in `paper.toml`**
+
+| Setting | Meaning |
+|---|---|
+| `capital`, `start`, `benchmark` | Account size, first trading day, and the index it is measured against |
+| `strategy` | `momentum` (monthly, top N) or `sma` / `rsi` / `breakout` (one signal per stock, equal slots) |
+| `per_stock`, `total` | Most of the account allowed in one stock, and in stocks altogether (%) |
+| `max_drawdown` | Kill switch: this far below its peak, the bot sells everything at the next open and stops. Set `resume = "YYYY-MM-DD"` to restart |
+| `min_order` | Skip buys and trims smaller than this many rupees: the flat DP charge makes them pointless |
+| `band` | How far a held stock may drift from its target before it is resized (%) |
+
+One cash pool is shared by all stocks. Whole shares only. Changing a rule takes effect the next day; past fills are never rewritten.
+
+**Files in `nse-paper-log/bot/`**
+
+| File | What it holds |
+|---|---|
+| `ledger.csv` | Every fill, dividend and split. Rows are only ever added |
+| `equity.csv` | One row per day: account value, cash, and the index held instead |
+| `positions.csv` | What is held now, with average cost and P&L |
+| `warnings.csv` | Every price-check and reconciliation warning. Rows are only ever added |
+| `state.json` | Where the bot got to, and the orders for the next open |
+| `snapshot.csv` | Yesterday's copy of recent prices, for the price check |
+
+**The two daily checks**
+
+1. **Price check.** Today's saved prices are compared with yesterday's copy, for every stock in the list.
+   - Whole history moved by one factor: a dividend or split. The account gets the dividend in cash or the new share count. No warning.
+   - Anything else: Yahoo revised the past, or a bad tick. Warning.
+2. **Reconciliation.** The backtester is re-run over the paper period with today's prices and compared with the ledger, fill by fill and day by day. Any difference is a warning: revised prices, data that arrived late, or a logic bug. Each problem is reported once; the check then carries on from that day.
+
+The bot fills at the prices of the day, not at prices adjusted backwards later, which is why the ledger never needs rewriting.
+
+**Ready for real money?** The page ends with a checklist. All five must pass:
+
+1. At least 6 months of live paper trading. Days filled in from history when the account was set up don't count: that is a backtest.
+2. Ahead of holding the index after costs, by more than the index's dividends (about 1.2% a year).
+3. Worst fall no deeper than the index's.
+4. Kill switch never tripped.
+5. No price or reconciliation warnings in the last 30 days.
+
+Until then, the honest default for real money is an index fund: the walk-forward test below found no proof that the default strategy beats it. Live paper trading has one advantage over that backtest: going forward, today's stock list carries no hindsight.
+
+Not modelled: stop-losses per position (the single-stock engine has them, portfolio mode does not), capital-gains tax, and interest on idle cash.
+
 ## Strategies
 
 | Name | Type | Rule | Settings (default) |
@@ -196,16 +263,16 @@ Add your own in `backtester/strategies.py`: write a function that returns 1 (inv
 2. **Real costs.** Zerodha delivery rates (checked Oct 2026): STT 0.1% each side, exchange + SEBI fees, stamp duty on buys, GST, plus 0.05% slippage per side (`backtester/costs.py`), and the flat DP charge (₹15.34 per stock per day it is sold). Capital-gains tax is not included, so frequent traders look better than reality.
 3. **Overfitting check.** `optimize` tunes on old data and reports performance on newer, unseen data. If the test result collapses, the "best" settings were luck.
 4. **Conservative stops.** Gaps fill at the open, not the stop price. Trailing stops trail closes, not intraday highs, because daily data can't tell whether the high came before the low.
-5. **Tested.** 57 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, trade-by-trade returns reconciling with the equity curve, the competition, whole-share portfolio fills, DP charges, rebalancing, momentum ranking, the walk-forward windows, the price job (a bad download never replaces saved prices) and the paper log's private repo (saving from two devices is caught, not overwritten).
+5. **Tested.** 80 `pytest` checks cover the timing rule, costs, stop fills (normal, gap, trailing, re-entry), each sizing method, trade-by-trade returns reconciling with the equity curve, the competition, whole-share portfolio fills, DP charges, rebalancing, momentum ranking, the walk-forward windows, the paper bot (day-by-day equals one long backtest, the ledger only grows, kill switch, dividends and splits, revised prices are flagged), the price job (a bad download never replaces saved prices) and the paper log's private repo (saving from two devices is caught, not overwritten).
 
 ## Limits (read before trading real money)
 
-- Long-only. `test`, `compare` and `scan` trade one stock at a time; only `walkforward` runs a combined portfolio.
+- Long-only. `test`, `compare` and `scan` trade one stock at a time; `walkforward` and the paper bot run a combined portfolio.
 - **Survivorship bias:** `nifty50.txt` holds today's members, so stocks that crashed out of the index are missing and results look better than reality.
 - Daily data only, so no intraday strategies. Saved prices refresh once a day, after the close.
 - Cash earns 0% while out of the market (in reality you'd park it in a liquid fund).
 - Yahoo data is free but occasionally has gaps or bad ticks.
-- A good backtest is necessary, not sufficient. Paper trade a strategy for a few months before using real money.
+- A good backtest is necessary, not sufficient. Let the paper bot run a strategy for at least six months before using real money.
 
 ## Project layout
 
@@ -224,11 +291,13 @@ backtester/
   portfolio.py           portfolio simulation (shared cash, whole shares, limits)
   momentum.py            monthly momentum ranking + market filter
   walkforward.py         rolling train/test windows, report, verdict
+  paper.py               the paper bot: daily fills, ledger, price check, reconciliation
   engine.py              the simulation (timing, costs, trade log)
   costs.py               Indian delivery charges
   metrics.py             CAGR, Sharpe, drawdown, ...
   plotting.py            charts
 tests/                   pytest suite
+paper.toml               the paper bot's rules
 watchlist.txt            your stocks for scan / today
 nifty50.txt              Nifty 50 members (after the Sep 30, 2026 rebalance)
 docs/LEARNING.md         learning path

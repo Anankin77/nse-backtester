@@ -7,3 +7,4 @@ data/
 results/
 paper_trades.csv
 .streamlit/secrets.toml
+paper_log/

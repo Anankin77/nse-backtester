@@ -1,5 +1,8 @@
 # Saves the day's prices into prices/ every weekday evening, so the web app (on your
 # laptop or hosted) reads them from the repo and never needs Yahoo itself.
+# Then the paper bot trades its fake account on those prices (paper.toml, backtester/paper.py)
+# and writes the result to the private nse-paper-log repo. It needs the PAPER_LOG_TOKEN secret;
+# without it the step is skipped with a warning.
 # Run it by hand any time: GitHub > Actions > Update prices > Run workflow.
 name: Update prices
 
@@ -9,7 +12,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [".github/workflows/prices.yml", "backtester/update.py", "watchlist.txt", "nifty50.txt"]
+    paths: [".github/workflows/prices.yml", "backtester/update.py", "watchlist.txt", "nifty50.txt",
+            "paper.toml", "backtester/paper.py", "backtester/portfolio.py", "backtester/momentum.py"]
 
 permissions:
   contents: write
@@ -30,7 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -q "pandas>=2.0" "numpy>=1.24" "yfinance>=0.2.40"
+        run: pip install -q "pandas>=2.0" "numpy>=1.24" "yfinance>=0.2.40" "requests>=2.31"
 
       - name: Download prices from Yahoo
         run: python -m backtester.update
@@ -46,3 +50,10 @@ jobs:
           git commit -q -m "Prices up to $last"
           git pull -q --rebase origin main
           git push -q origin HEAD:main
+
+      # Only after a good price download: a failed one stops the job before this step.
+      - name: Paper bot
+        env:
+          PAPER_LOG_REPO: ${{ vars.PAPER_LOG_REPO || format('{0}/nse-paper-log', github.repository_owner) }}
+          PAPER_LOG_TOKEN: ${{ secrets.PAPER_LOG_TOKEN }}
+        run: python -m backtester.paper

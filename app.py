@@ -21,6 +21,7 @@ from backtester.analysis import (PRESETS, RANK_BY, SCAN_STRATEGIES, drop_incompl
                                  signal_row, strategy_table, tournament)
 from backtester.data import stored_status
 from backtester.github_file import GitHubError, GitHubFile
+from backtester import paper as bot
 
 ROOT = Path(__file__).resolve().parent
 OFFLINE = bool(os.environ.get("BACKTESTER_OFFLINE"))  # fake prices, for testing without internet
@@ -208,9 +209,9 @@ def home():
     cards = [
         (P_BACKTEST, "Backtest", "One company, one strategy. See every trade it would have made."),
         (P_COMPETE, "Compete", "Strategies and companies compete. Find what actually works, and what was luck."),
-        (P_TODAY, "Today's signals", "What the strategies say for tomorrow. For paper trading."),
+        (P_BOT, "Paper bot", "A fake account that trades itself every evening. Is it beating the index?"),
     ]
-    for col, (page, title, text) in zip(st.columns(3, gap="medium"), cards):
+    for col, (page, title, text) in zip(st.columns(len(cards), gap="medium"), cards):
         with col.container(border=True):
             st.markdown(f"**{title}**")
             st.caption(text)
@@ -624,6 +625,144 @@ def paper_log():
         st.dataframe(pnl.round(2))
 
 
+# ---------------------------------------------------------------- paper bot
+
+def bot_store():
+    """Where the bot's files are: the private repo (app secrets), or a local folder."""
+    try:
+        conf = st.secrets.get("paper_log") or {}
+    except Exception:  # no secrets file at all
+        conf = {}
+    if conf.get("repo") and conf.get("token"):
+        return bot.GitHubStore(conf["repo"], conf["token"], api=conf.get("api", "https://api.github.com"))
+    if os.environ.get("PAPER_LOG_DIR"):
+        return bot.DirStore(os.environ["PAPER_LOG_DIR"])
+    if (ROOT / "paper_log").exists():
+        return bot.DirStore(ROOT / "paper_log")
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def bot_account(version: str) -> dict | None:
+    store = bot_store()
+    return bot.read_account(store) if store else None
+
+
+def rupees(v: float) -> str:
+    return f"Rs {v:,.0f}"
+
+
+def paper_bot():
+    st.title("Paper bot")
+    lead("A fake account that trades itself every evening by the rules in paper.toml. Nothing to log by hand.")
+    if st.button("Refresh", icon=":material/refresh:"):
+        bot_account.clear()
+    try:
+        acct = bot_account(f"{stored_status().get('updated')}|{date.today()}")
+    except GitHubError as e:
+        st.error(f"Couldn't read the bot's files. {e}")
+        return
+    if acct is None:
+        st.info("Not set up yet. The bot needs the private `nse-paper-log` repo: add the same token as a "
+                "GitHub Actions secret named `PAPER_LOG_TOKEN` (README, 'Paper bot'). "
+                "To try it on a laptop first: `python run.py paper --dir paper_log`.")
+        return
+    state, eq = acct["state"], acct["equity"]
+    if state is None or not len(eq):
+        st.info("The bot hasn't traded yet. It runs with the daily price job after the market closes, "
+                "from the start date in paper.toml.")
+        return
+
+    r, book = state["rules"], state["book"]
+    params = ", ".join(f"{k} {v}" for k, v in r["params"].items())
+    st.caption(f"**{state['account']}** · {r['strategy']} ({params}) on {r['stocks']} stocks · "
+               f"at most {r['per_stock_pct']:.0f}% per stock, {r['total_pct']:.0f}% in total · "
+               f"prices up to {pd.Timestamp(state['last_day']):%a %d %b %Y}")
+    if book["killed"]:
+        st.error(f"**Kill switch is on** since {book['killed_on']}: the account fell {r['max_drawdown_pct']:.0f}% "
+                 "from its peak, so everything was sold and nothing is bought. To restart, set `resume` in paper.toml.")
+
+    value, bench, cap = float(eq["equity"].iloc[-1]), float(eq["benchmark"].iloc[-1]), float(r["capital"])
+    mine, idx = 100 * (value / cap - 1), 100 * (bench / cap - 1)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Account", rupees(value), f"{mine:+.1f}%")
+    c2.metric(f"If you held {r['benchmark']}", rupees(bench), f"{idx:+.1f}%")
+    c3.metric("Bot minus index", f"{mine - idx:+.1f} pts", rupees(value - bench), delta_color="normal")
+    c4.metric("Below its peak", f"{float(eq['drawdown_pct'].iloc[-1]):.1f}%",
+              f"limit -{r['max_drawdown_pct']:.0f}%" if r["max_drawdown_pct"] else None, delta_color="off")
+
+    st.subheader("Orders for the next open")
+    pending = pd.DataFrame(state.get("pending", []))
+    if len(pending):
+        pending["value"] = pending["shares"] * pending["est_price"]
+        pending["side"] = pending["side"].str.upper()
+        st.dataframe(pending.rename(columns={"ticker": "Stock", "side": "Side", "shares": "Shares",
+                                             "est_price": "Last close", "value": "About (Rs)", "reason": "Why"}),
+                     hide_index=True, width="stretch",
+                     column_config={"Last close": st.column_config.NumberColumn(format="%.2f"),
+                                    "About (Rs)": st.column_config.NumberColumn(format="%.0f")})
+        st.caption("Sized at the last close. The bot fills them at tomorrow's open, so the share count can differ a little.")
+    else:
+        st.caption("None. The bot holds what it has.")
+
+    st.subheader("Open positions")
+    pos = acct["positions"]
+    if len(pos):
+        st.dataframe(pos.rename(columns={"ticker": "Stock", "shares": "Shares", "avg_cost": "Avg cost",
+                                         "last_close": "Last close", "value": "Value (Rs)", "pnl": "P&L (Rs)",
+                                         "pnl_pct": "P&L %", "weight_pct": "% of account"}),
+                     hide_index=True, width="stretch",
+                     column_config={c: st.column_config.NumberColumn(format=f)
+                                    for c, f in [("Avg cost", "%.2f"), ("Last close", "%.2f"), ("Value (Rs)", "%.0f"),
+                                                 ("P&L (Rs)", "%+.0f"), ("P&L %", "%+.1f"), ("% of account", "%.1f")]})
+        st.caption(f"Cash: {rupees(book['cash'])} ({100 * book['cash'] / value:.0f}% of the account).")
+    else:
+        st.caption(f"None. All {rupees(book['cash'])} is in cash.")
+
+    st.subheader("Bot against buy & hold")
+    days = pd.to_datetime(eq["date"])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=days, y=eq["benchmark"], name=f"Held {r['benchmark']}", line=dict(color=GREY, width=1.2)))
+    fig.add_trace(go.Scatter(x=days, y=eq["equity"], name="Paper bot", line=dict(color=BLUE, width=1.8)))
+    fig.update_layout(height=340, hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), yaxis_title="Rs")
+    st.plotly_chart(fig, width="stretch", config=CHART_CONFIG)
+
+    st.subheader("Ready for real money?")
+    live = state.get("live_since") or eq["date"].iloc[0]
+    checks = bot.scorecard(eq, acct["warnings"], r["max_drawdown_pct"], live, cap)
+    if live > eq["date"].iloc[0]:
+        st.caption(f"Counted from {live}, the day the bot started running. Earlier days were filled in from "
+                   "history, which is a backtest, not paper trading.")
+    for c in checks:
+        mark = ":material/check_circle:" if c["ok"] else ":material/cancel:"
+        st.markdown(f"{mark} {c['check']}" + (f" · *{c['detail']}*" if c["detail"] else ""))
+    if all(c["ok"] for c in checks):
+        st.success("Every check passes. That is evidence, not a promise: if you go live, start small, "
+                   "keep the same rules, and keep this bot running beside it.")
+    else:
+        st.warning("Not yet. Until every check passes, an index fund is the better place for real money.")
+
+    st.subheader("Reconciliation")
+    chk = state["checked"]
+    st.caption(f"Each evening the backtester is re-run over the paper period with that day's prices and compared "
+               f"with the ledger. Last check {chk['on']}: {chk['days']} day(s) from {chk['from']}, "
+               f"{chk['differences']} difference(s).")
+    warn = acct["warnings"]
+    if len(warn):
+        recent = warn[pd.to_datetime(warn["found_on"]) > days.iloc[-1] - pd.Timedelta(days=30)]
+        if len(recent):
+            st.warning(f"{len(recent)} warning(s) in the last 30 days.")
+        st.dataframe(warn.iloc[::-1].rename(columns={"found_on": "Found", "date": "Day", "ticker": "Stock",
+                                                     "kind": "What", "detail": "Detail"}),
+                     hide_index=True, width="stretch")
+    else:
+        st.caption(":material/check_circle: No warnings so far.")
+
+    with st.expander(f"Ledger ({len(acct['ledger'])} rows)"):
+        st.dataframe(acct["ledger"].iloc[::-1], hide_index=True, width="stretch")
+
+
 def learn():
     st.title("Learn")
     guide = ROOT / "docs" / "LEARNING.md"
@@ -648,9 +787,10 @@ P_HOME = st.Page(home, title="Home", icon=":material/home:", default=True)
 P_BACKTEST = st.Page(backtest, title="Backtest", icon=":material/show_chart:")
 P_COMPETE = st.Page(compete, title="Compete", icon=":material/emoji_events:")
 P_TODAY = st.Page(today, title="Today's signals", icon=":material/notifications:")
-P_LOG = st.Page(paper_log, title="Paper log", icon=":material/edit_note:")
+P_BOT = st.Page(paper_bot, title="Paper bot", icon=":material/smart_toy:")
+P_LOG = st.Page(paper_log, title="Manual log", icon=":material/edit_note:")
 P_LEARN = st.Page(learn, title="Learn", icon=":material/school:")
 
-page = st.navigation([P_HOME, P_BACKTEST, P_COMPETE, P_TODAY, P_LOG, P_LEARN])
+page = st.navigation([P_HOME, P_BACKTEST, P_COMPETE, P_TODAY, P_BOT, P_LOG, P_LEARN])
 cfg = sidebar_settings()
 page.run()

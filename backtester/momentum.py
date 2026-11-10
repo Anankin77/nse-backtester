@@ -18,9 +18,18 @@ LOOKBACKS = {"6m": (6,), "12m": (12,), "6m+12m": (6, 12)}
 
 
 def month_ends(calendar: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """Last trading day of each month in the calendar."""
+    """Last trading day of each month in the calendar.
+
+    The calendar's final day only counts if the month is really over (the next
+    weekday falls in a new month). Otherwise a half-finished month would look like
+    a month-end and trigger a rebalance.
+    """
     s = calendar.to_series()
-    return pd.DatetimeIndex(s.groupby(calendar.to_period("M")).max().to_numpy())
+    ends = pd.DatetimeIndex(s.groupby(calendar.to_period("M")).max().to_numpy())
+    last = calendar[-1]
+    if len(ends) and (last + pd.offsets.BDay(1)).month == last.month:
+        ends = ends[:-1]
+    return ends
 
 
 def momentum_scores(closes: pd.DataFrame, lookback: str = "6m+12m", skip: int = 1) -> pd.DataFrame:

@@ -10,6 +10,7 @@ Examples
   python run.py today                   # today's signals, for paper trading
   python run.py update                  # refresh the saved prices in prices/
   python run.py walkforward             # momentum portfolio vs holding the Nifty, out-of-sample
+  python run.py paper --dir paper_log   # run the paper broker once, writing to a local folder
 """
 from __future__ import annotations
 
@@ -260,6 +261,14 @@ def cmd_walkforward(args):
     print(f"\nWindow tables saved to {OUT}")
 
 
+def cmd_paper(args):
+    """Run the paper broker once. The daily price job does this; --dir tries it on your laptop."""
+    from backtester import paper
+    argv = ["--config", args.config] + (["--dir", args.dir] if args.dir else [])
+    if code := paper.main(argv):
+        raise SystemExit(code)
+
+
 def show(df, results, args, title):
     OUT.mkdir(exist_ok=True)
     print(f"\n{title}")
@@ -340,6 +349,11 @@ def main():
     w.add_argument("--end", default=None)
     w.add_argument("--no-costs", action="store_true")
     w.set_defaults(func=cmd_walkforward)
+
+    pb = sub.add_parser("paper", help="run the paper broker once (the daily price job does this)")
+    pb.add_argument("--config", default=str(Path(__file__).resolve().parent / "paper.toml"))
+    pb.add_argument("--dir", help="write to this folder instead of the private repo, e.g. paper_log")
+    pb.set_defaults(func=cmd_paper)
 
     args = p.parse_args()
     try:

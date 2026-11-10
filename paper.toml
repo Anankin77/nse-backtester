@@ -1,0 +1,28 @@
+# The paper bot's rules. The daily price job reads this file every evening and trades
+# a fake account by it (backtester/paper.py). Results go to the bot/ folder of your
+# private nse-paper-log repo and show on the "Paper bot" page.
+#
+# Changing a rule is fine: the bot follows the new rule from the next day, and the
+# daily check restarts from that day. Past fills are never rewritten.
+
+[account]
+name      = "momentum-1L"
+capital   = 100000          # Rs. Below ~Rs 50,000 the flat Rs 15.34 DP charge per sale eats the returns
+start     = "2026-11-11"    # first trading day of the account
+benchmark = "^NSEI"         # "what if I had just bought the index?"
+
+[strategy]
+name     = "momentum"       # momentum | sma | rsi | breakout
+stocks   = "nifty50"        # a list file (nifty50, watchlist) or ["TCS", "ITC", "SBIN"]
+lookback = "6m+12m"         # momentum only: 6m | 12m | 6m+12m (latest month always skipped)
+top_n    = 5                # momentum only: how many stocks to hold
+sma_days = 200              # momentum only: all cash while the index is below this average (0 = off)
+# sma / rsi / breakout take their own settings instead, e.g.  fast = 50  slow = 200
+
+[risk]
+per_stock    = 25           # % of the account, at most, in one stock
+total        = 100          # % of the account, at most, in stocks
+max_drawdown = 20           # kill switch: at this % below the account's peak, sell everything and stop
+min_order    = 2000         # Rs. Skip buys and trims smaller than this (not worth the charges)
+band         = 20           # % drift from target before a held stock is resized
+# resume     = "2027-01-04" # after the kill switch trips: the date to start trading again
